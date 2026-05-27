@@ -1,7 +1,5 @@
 import crypto from "node:crypto";
-import express, { type Request, type Response } from "express";
-import { Agent, CursorAgentError } from "@cursor/sdk";
-import { LinearClient } from "@linear/sdk";
+import express from "express";
 
 type AgentRole = "hero" | "chorus";
 
@@ -15,10 +13,9 @@ interface LinearIssuePayload {
 }
 
 const ghOwner = process.env.GH_OWNER ?? "hsaab";
-const cursorKey = process.env.CURSOR_API_KEY ?? "";
-const linearKey = process.env.LINEAR_API_KEY ?? "";
-const webhookSecret = process.env.LINEAR_WEBHOOK_SECRET ?? "";
-const linear = new LinearClient({ apiKey: linearKey });
+const cursorKey = () => process.env.CURSOR_API_KEY ?? "";
+const linearKey = () => process.env.LINEAR_API_KEY ?? "";
+const webhookSecret = () => process.env.LINEAR_WEBHOOK_SECRET ?? "";
 const seenDeliveries = new Set<string>();
 
 function buildPrompt(issue: LinearIssuePayload, role: AgentRole): string {
@@ -30,13 +27,17 @@ function buildPrompt(issue: LinearIssuePayload, role: AgentRole): string {
 }
 
 async function postComment(issueId: string, body: string): Promise<void> {
-  if (!linearKey) return;
+  const key = linearKey();
+  if (!key) return;
+  const { LinearClient } = await import("@linear/sdk");
+  const linear = new LinearClient({ apiKey: key });
   await linear.createComment({ issueId, body });
 }
 
 function verifySignature(rawBody: Buffer, signature: string | undefined): boolean {
-  if (!webhookSecret || !signature) return false;
-  const digest = crypto.createHmac("sha256", webhookSecret).update(rawBody).digest("hex");
+  const secret = webhookSecret();
+  if (!secret || !signature) return false;
+  const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
   const a = Buffer.from(digest, "hex");
   const b = Buffer.from(signature, "hex");
   return a.length === b.length && crypto.timingSafeEqual(a, b);
@@ -48,11 +49,12 @@ function shouldSpawn(issue: LinearIssuePayload): boolean {
 }
 
 async function runAgent(role: AgentRole, issue: LinearIssuePayload): Promise<void> {
+  const { Agent, CursorAgentError } = await import("@cursor/sdk");
   const repo = role === "hero" ? "compound" : "server";
   const label = role === "hero" ? "Hero" : "Chorus";
   try {
     await using agent = await Agent.create({
-      apiKey: cursorKey,
+      apiKey: cursorKey(),
       model: { id: "composer-2.5" },
       cloud: {
         repos: [{ url: `https://github.com/${ghOwner}/${repo}` }],
@@ -94,27 +96,23 @@ async function handleWebhook(payload: { action: string; type: string; data: Line
 const app = express();
 app.get("/api/health", (_req, res) => res.status(200).json({ ok: true }));
 
-app.post(
-  "/webhook/linear",
-  express.raw({ type: "*/*" }),
-  (req: Request, res: Response) => {
-    const delivery = req.headers["linear-delivery"] as string | undefined;
-    const rawBody = req.body as Buffer;
-    if (!verifySignature(rawBody, req.headers["linear-signature"] as string | undefined)) {
-      console.error("[webhook] signature verification failed");
-      return res.status(401).json({ error: "invalid signature" });
-    }
-    if (delivery && seenDeliveries.has(delivery)) {
-      return res.status(200).json({ ok: true, deduped: true });
-    }
-    if (delivery) seenDeliveries.add(delivery);
-    console.log("[webhook] signature verified");
-    res.status(200).json({ ok: true });
-    handleWebhook(JSON.parse(rawBody.toString())).catch((err) =>
-      console.error("[webhook] handler error:", err),
-    );
-  },
-);
+app.post("/webhook/linear", express.raw({ type: "*/*" }), (req, res) => {
+  const delivery = req.headers["linear-delivery"] as string | undefined;
+  const rawBody = req.body as Buffer;
+  if (!verifySignature(rawBody, req.headers["linear-signature"] as string | undefined)) {
+    console.error("[webhook] signature verification failed");
+    return res.status(401).json({ error: "invalid signature" });
+  }
+  if (delivery && seenDeliveries.has(delivery)) {
+    return res.status(200).json({ ok: true, deduped: true });
+  }
+  if (delivery) seenDeliveries.add(delivery);
+  console.log("[webhook] signature verified");
+  res.status(200).json({ ok: true });
+  handleWebhook(JSON.parse(rawBody.toString())).catch((err) =>
+    console.error("[webhook] handler error:", err),
+  );
+});
 
 export default app;
 
