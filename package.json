@@ -11,6 +11,7 @@
   "dependencies": {
     "@cursor/sdk": "^1.0.13",
     "@linear/sdk": "^29.0.0",
+    "@vercel/functions": "^2.0.0",
     "express": "^4.21.2"
   },
   "devDependencies": {

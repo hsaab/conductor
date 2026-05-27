@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import express from "express";
+import { waitUntil } from "@vercel/functions";
 
 type AgentRole = "hero" | "chorus";
 
@@ -109,8 +110,10 @@ app.post("/webhook/linear", express.raw({ type: "*/*" }), (req, res) => {
   if (delivery) seenDeliveries.add(delivery);
   console.log("[webhook] signature verified");
   res.status(200).json({ ok: true });
-  handleWebhook(JSON.parse(rawBody.toString())).catch((err) =>
-    console.error("[webhook] handler error:", err),
+  waitUntil(
+    handleWebhook(JSON.parse(rawBody.toString())).catch((err) =>
+      console.error("[webhook] handler error:", err),
+    ),
   );
 });
 
