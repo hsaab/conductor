@@ -9,6 +9,9 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import os from "node:os";
+import path from "node:path";
+import { FleetFollower } from "./follow-fleet.mjs";
 
 const execFileAsync = promisify(execFile);
 const fleetPrUrlRe = /https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/i;
@@ -22,14 +25,40 @@ const intervalMs = Number(process.env.LINEAR_POLL_INTERVAL_MS ?? 3000);
 // How often to ask the bridge to reconcile finished agents -> PR URLs. Decoupled
 // from the poll interval so we don't hammer the Cursor API every few seconds.
 const reconcileIntervalMs = Number(process.env.LINEAR_RECONCILE_INTERVAL_MS ?? 15000);
+// How often to refresh live agent status for the terminal + canvas. Runs on its
+// own loop so the demo feels snappy without speeding up the Linear poll.
+const followIntervalMs = Number(process.env.FLEET_FOLLOW_INTERVAL_MS ?? 2000);
 const marker = "<!-- cursor-demo-bridge:fleet-started -->";
 const triggeredIssueIds = new Set();
 let lastReconcileAt = 0;
+
+// Live demo follower: reads each launched agent's run status and streams the
+// queued -> running -> finished progression to the terminal + the canvas. The
+// canvas lives in Cursor's managed projects directory, derived from the repo's
+// absolute path (override with FLEET_CANVAS_PATH).
+const cursorApiKey = process.env.CURSOR_API_KEY;
+const defaultCanvasPath = path.join(
+  os.homedir(),
+  ".cursor",
+  "projects",
+  process.cwd().replace(/^\//, "").replace(/\//g, "-"),
+  "canvases",
+  "fleet-status.canvas.tsx",
+);
+const canvasPath = process.env.FLEET_CANVAS_PATH ?? defaultCanvasPath;
 
 if (!linearKey || !triggerSecret) {
   console.error("Set LINEAR_API_KEY and BRIDGE_TRIGGER_SECRET");
   process.exit(1);
 }
+
+const follower = new FleetFollower({
+  bridgeUrl,
+  triggerSecret,
+  cursorApiKey,
+  canvasPath,
+  log: (line) => console.log(line),
+});
 
 async function gql(query, variables = {}) {
   const res = await fetch("https://api.linear.app/graphql", {
@@ -199,10 +228,25 @@ async function reconcileOnce() {
   }
 }
 
+// Independent fast loop: stream live agent progress to the terminal + canvas
+// every followIntervalMs, so the demo never goes silent between status changes.
+async function followLoop() {
+  while (true) {
+    try {
+      await follower.refresh();
+    } catch (err) {
+      console.error("[watch-linear] follow", err);
+    }
+    await new Promise((resolve) => setTimeout(resolve, followIntervalMs));
+  }
+}
+
 async function main() {
   console.log(
     `[watch-linear] watching Linear label="${labelName}" state="${stateName}" -> ${bridgeUrl}/api/trigger`,
   );
+  console.log(`[watch-linear] live follow every ${followIntervalMs}ms -> terminal + canvas ${canvasPath}`);
+  followLoop();
   while (true) {
     try {
       await pollOnce();
