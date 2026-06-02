@@ -1,106 +1,164 @@
-import crypto from "node:crypto";
+/**
+ * HTTP surface for the Linear ↔ Cursor bridge.
+ *
+ * Routes:
+ *  - GET  /api/health     liveness probe
+ *  - GET  /api/jobs       secured read-only view of in-progress fleets
+ *  - GET  /api/jobs/:id   single launched fleet by Linear identifier
+ *  - POST /api/trigger    secured manual/poller fallback for the Linear webhook
+ *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
+ *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
+ *  - POST /webhook/linear  Linear webhook (signature-verified)
+ *
+ * Spawning is fast and synchronous-ish; completion is handled out-of-band by the
+ * reconciler so no request ever blocks on a multi-minute agent run.
+ */
 import express from "express";
 import { waitUntil } from "@vercel/functions";
 
-type AgentRole = "hero" | "chorus";
+// Express's Request/Response types resolve inconsistently inside the
+// @vercel/node builder (it reports `.status`/`.get` as missing even though they
+// exist), so route handlers use loose aliases — matching the original bridge —
+// to keep the production build clean. Runtime behavior is unaffected.
+type Req = any;
+type Res = any;
+import { markers, triggerLabel, triggerState } from "./config.js";
+import { fetchIssue, hasComment, normalizeIssue } from "./linear.js";
+import { getJob, listJobs, reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
+import { isAuthorizedReconcile, isAuthorizedTrigger, verifyLinearSignature } from "./security.js";
+import type { LinearIssuePayload } from "./types.js";
 
-interface LinearIssuePayload {
-  id: string;
-  identifier: string;
-  title: string;
-  description?: string | null;
-  labels?: Array<{ name: string }>;
-  state?: { name: string };
-}
-
-const ghOwner = process.env.GH_OWNER ?? "hsaab";
-const cursorKey = () => process.env.CURSOR_API_KEY ?? "";
-const linearKey = () => process.env.LINEAR_API_KEY ?? "";
-const webhookSecret = () => process.env.LINEAR_WEBHOOK_SECRET ?? "";
+/** Best-effort, per-instance dedupe of webhook redeliveries. */
 const seenDeliveries = new Set<string>();
 
-function buildPrompt(issue: LinearIssuePayload, role: AgentRole): string {
-  const ticket = `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? ""}`;
-  if (role === "hero") {
-    return `${ticket}\n\n## Role: Hero (compound)\n\nImplement the full ticket in ${ghOwner}/compound:\n- X-Request-ID middleware (read incoming header or generate UUID)\n- AsyncLocalStorage for request-scoped context\n- Structured logger includes requestId on every line\n- Small UI footer showing the current request ID\n- Tests for generated and echoed request IDs\n\nOpen a PR when done.`;
-  }
-  return `${ticket}\n\n## Role: Chorus (server / Bitwarden)\n\nScoped work in ${ghOwner}/server only:\n- ASP.NET middleware for X-Request-ID (read or generate, echo on response)\n- Serilog enricher via LogContext.PushProperty("RequestId", ...)\n- One xUnit test exercising middleware behavior\n\nNo UI changes. Open a PR when done.`;
-}
-
-async function postComment(issueId: string, body: string): Promise<void> {
-  const key = linearKey();
-  if (!key) return;
-  const { LinearClient } = await import("@linear/sdk");
-  const linear = new LinearClient({ apiKey: key });
-  await linear.createComment({ issueId, body });
-}
-
-function verifySignature(rawBody: Buffer, signature: string | undefined): boolean {
-  const secret = webhookSecret();
-  if (!secret || !signature) return false;
-  const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
-  const a = Buffer.from(digest, "hex");
-  const b = Buffer.from(signature, "hex");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-function shouldSpawn(issue: LinearIssuePayload): boolean {
-  const labels = issue.labels?.map((l) => l.name) ?? [];
-  return labels.includes("cursor-fleet") && issue.state?.name === "In Progress";
-}
-
-async function runAgent(role: AgentRole, issue: LinearIssuePayload): Promise<void> {
-  const { Agent, CursorAgentError } = await import("@cursor/sdk");
-  const repo = role === "hero" ? "compound" : "server";
-  const label = role === "hero" ? "Hero" : "Chorus";
-  try {
-    await using agent = await Agent.create({
-      apiKey: cursorKey(),
-      model: { id: "composer-2.5" },
-      cloud: {
-        repos: [{ url: `https://github.com/${ghOwner}/${repo}` }],
-        autoCreatePR: true,
-        skipReviewerRequest: true,
-      },
-    });
-    await postComment(
-      issue.id,
-      `**Cursor ${label} agent spawned**\n\nAgent ID: \`${agent.agentId}\`\nRepo: \`${ghOwner}/${repo}\``,
-    );
-    console.log(`[${role}] spawned ${agent.agentId} for ${issue.identifier}`);
-    const run = await agent.send(buildPrompt(issue, role));
-    console.log(`[${role}] run=${run.id}`);
-    const result = await run.wait();
-    const prUrl = result.git?.branches?.[0]?.prUrl ?? "(no PR URL yet)";
-    const status = result.status === "finished" ? "finished" : `**${result.status}**`;
-    await postComment(
-      issue.id,
-      `**Cursor ${label} agent ${status}**\n\nAgent ID: \`${agent.agentId}\`\nPR: ${prUrl}`,
-    );
-    console.log(`[${role}] done agent=${agent.agentId} pr=${prUrl}`);
-    if (result.status === "error") console.error(`[${role}] run error: ${result.id}`);
-  } catch (err) {
-    const msg = err instanceof CursorAgentError ? `startup failed: ${err.message}` : String(err);
-    console.error(`[${role}] ${msg}`);
-    await postComment(issue.id, `**Cursor ${label} agent failed**\n\n${msg}`);
-  }
-}
-
-async function handleWebhook(payload: { action: string; type: string; data: LinearIssuePayload }): Promise<void> {
+async function handleWebhook(payload: {
+  action: string;
+  type: string;
+  data: LinearIssuePayload;
+}): Promise<void> {
   if (payload.type !== "Issue" || payload.action !== "update") return;
-  const issue = payload.data;
-  if (!shouldSpawn(issue)) return;
-  console.log(`[webhook] spawning fleet for ${issue.identifier}`);
-  await Promise.all([runAgent("hero", issue), runAgent("chorus", issue)]);
+  const webhookIssue = normalizeIssue(payload.data);
+  const isFleetLabeled = webhookIssue.labels?.some((l) => l.name === triggerLabel) ?? false;
+  if (!isFleetLabeled) return;
+
+  // Hydrate from the API so labels/comments/state reflect current truth.
+  let issue = webhookIssue;
+  try {
+    issue = (await fetchIssue(webhookIssue.id)) ?? webhookIssue;
+  } catch (err) {
+    console.error("[webhook] could not hydrate Linear issue:", err);
+  }
+
+  if (shouldSpawn(issue)) {
+    const result = await triggerFleet(issue, "linear-webhook");
+    if (!result.queued && result.reason) {
+      console.log(`[webhook] skipped ${issue.identifier}: ${result.reason}`);
+    }
+  } else if (hasComment(issue, markers.fleetStarted)) {
+    // Ticket left "In Progress" carrying an active fleet record: re-arm it so a
+    // future move back into "In Progress" launches a fresh fleet.
+    await resetIssue(issue.id);
+    console.log(`[webhook] re-armed ${issue.identifier} (left ${triggerState})`);
+  }
 }
 
 const app = express();
-app.get("/api/health", (_req, res) => res.status(200).json({ ok: true }));
 
-app.post("/webhook/linear", express.raw({ type: "*/*" }), (req, res) => {
+app.get("/api/health", (_req: Req, res: Res) => res.status(200).json({ ok: true }));
+
+// Read-only snapshot of launched fleets, reconstructed from Linear comments
+// (no Cursor SDK calls, no mutation). In-progress only by default; pass
+// `?all=1` to include completed fleets. Authorized like /api/trigger.
+app.get("/api/jobs", async (req: Req, res: Res) => {
+  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
+  try {
+    const includeComplete = req.query.all === "1" || req.query.all === "true";
+    const report = await listJobs({ includeComplete });
+    return res.status(200).json({ ok: true, ...report });
+  } catch (err) {
+    console.error("[jobs] failed:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+// Single launched fleet by Linear identifier (e.g. /api/jobs/ENG-7). Same auth
+// and Linear-derived shape as /api/jobs; 404 when no fleet has launched for it.
+app.get("/api/jobs/:identifier", async (req: Req, res: Res) => {
+  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
+  try {
+    const job = await getJob(req.params.identifier);
+    if (!job) return res.status(404).json({ error: `no launched fleet for ${req.params.identifier}` });
+    return res.status(200).json({ ok: true, generatedAt: new Date().toISOString(), job });
+  } catch (err) {
+    console.error("[jobs] failed:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
+  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
+
+  const issueId = req.body?.issueId ?? req.body?.identifier ?? req.body?.id;
+  if (typeof issueId !== "string" || issueId.trim().length === 0) {
+    return res.status(400).json({ error: "issueId, identifier, or id is required" });
+  }
+
+  const source = typeof req.body?.source === "string" ? req.body.source : "manual-trigger";
+  try {
+    const issue = await fetchIssue(issueId.trim());
+    if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueId}` });
+    if (!shouldSpawn(issue)) {
+      return res.status(202).json({ ok: true, queued: false, reason: "issue does not match trigger filters" });
+    }
+    if (hasComment(issue, markers.fleetStarted)) {
+      return res.status(202).json({ ok: true, queued: false, reason: "fleet already started for this issue" });
+    }
+
+    res.status(202).json({ ok: true, queued: true, issue: issue.identifier });
+    waitUntil(
+      triggerFleet(issue, source).catch((err) => console.error("[trigger] handler error:", err)),
+    );
+  } catch (err) {
+    console.error("[trigger] failed:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+// Re-arms an issue (clears the bridge's comments + reaction) so dragging it
+// back into "In Progress" launches a fresh fleet. Driven by the poller when a
+// ticket leaves "In Progress". Authorized like /api/trigger.
+app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
+  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
+  const issueId = req.body?.issueId ?? req.body?.id;
+  if (typeof issueId !== "string" || issueId.trim().length === 0) {
+    return res.status(400).json({ error: "issueId or id is required" });
+  }
+  try {
+    const result = await resetIssue(issueId.trim());
+    return res.status(200).json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[reset] failed:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET for Vercel Cron (the daily backstop); POST for the local poller's fast
+// driver. Both authenticate via {@link isAuthorizedReconcile}.
+app.all("/api/reconcile", async (req: Req, res: Res) => {
+  if (!isAuthorizedReconcile(req)) return res.status(401).json({ error: "unauthorized" });
+  try {
+    const summary = await reconcileAll();
+    return res.status(200).json({ ok: true, ...summary });
+  } catch (err) {
+    console.error("[reconcile] failed:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
+app.post("/webhook/linear", express.raw({ type: "*/*" }), (req: Req, res: Res) => {
   const delivery = req.headers["linear-delivery"] as string | undefined;
   const rawBody = req.body as Buffer;
-  if (!verifySignature(rawBody, req.headers["linear-signature"] as string | undefined)) {
+  if (!verifyLinearSignature(rawBody, req.headers["linear-signature"] as string | undefined)) {
     console.error("[webhook] signature verification failed");
     return res.status(401).json({ error: "invalid signature" });
   }

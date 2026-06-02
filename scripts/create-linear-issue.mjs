@@ -56,9 +56,9 @@ This sprint covers two services in the initial wave:
 Label \`cursor-fleet\` triggers the Cursor SDK bridge when this ticket moves to **In Progress**.`;
 
 async function main() {
-  const viewer = await gql(`query { viewer { id name teams { nodes { id name issueLabels { nodes { id name } } states { nodes { id name type } } } } } }`);
+  const viewer = await gql(`query { viewer { id name teams { nodes { id name labels { nodes { id name } } states { nodes { id name type } } } } } }`);
   const team = viewer.viewer.teams.nodes.find((t) => t.name === "DevEx") ?? viewer.viewer.teams.nodes[0];
-  let label = team.issueLabels.nodes.find((l) => l.name === "cursor-fleet");
+  let label = team.labels.nodes.find((l) => l.name === "cursor-fleet");
   if (!label) {
     const created = await gql(
       `mutation($name: String!, $teamId: String!) { issueLabelCreate(input: { name: $name, teamId: $teamId, color: "#f54e00" }) { success issueLabel { id name } } }`,
