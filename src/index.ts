@@ -2,16 +2,15 @@
  * HTTP surface for the Linear ↔ Cursor bridge.
  *
  * Routes:
- *  - GET  /api/health     liveness probe
- *  - GET  /api/jobs       secured read-only view of in-progress fleets
- *  - GET  /api/jobs/:id   single launched fleet by Linear identifier
- *  - POST /api/trigger    secured manual/poller fallback for the Linear webhook
- *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
+ *  - POST /webhook/linear  Linear webhook (signature-verified) — the trigger
+ *  - GET  /api/health      liveness probe
  *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
- *  - POST /webhook/linear  Linear webhook (signature-verified)
+ *  - POST /api/trigger     secured manual fallback for the Linear webhook
+ *  - POST /api/reset       secured manual re-arm (clears bridge comments + reaction)
  *
- * Spawning is fast and synchronous-ish; completion is handled out-of-band by the
- * reconciler so no request ever blocks on a multi-minute agent run.
+ * Moving a labeled ticket into "In Progress" fires the webhook, which spawns the
+ * fleet fire-and-forget. Completion is handled out-of-band by the reconciler
+ * (Vercel Cron) so no request ever blocks on a multi-minute agent run.
  */
 import express from "express";
 import { waitUntil } from "@vercel/functions";
@@ -24,7 +23,7 @@ type Req = any;
 type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
 import { fetchIssue, hasComment, normalizeIssue } from "./linear.js";
-import { getJob, listJobs, reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
+import { reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
 import { isAuthorizedReconcile, isAuthorizedTrigger, verifyLinearSignature } from "./security.js";
 import type { LinearIssuePayload } from "./types.js";
 
@@ -65,35 +64,6 @@ async function handleWebhook(payload: {
 const app = express();
 
 app.get("/api/health", (_req: Req, res: Res) => res.status(200).json({ ok: true }));
-
-// Read-only snapshot of launched fleets, reconstructed from Linear comments
-// (no Cursor SDK calls, no mutation). In-progress only by default; pass
-// `?all=1` to include completed fleets. Authorized like /api/trigger.
-app.get("/api/jobs", async (req: Req, res: Res) => {
-  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
-  try {
-    const includeComplete = req.query.all === "1" || req.query.all === "true";
-    const report = await listJobs({ includeComplete });
-    return res.status(200).json({ ok: true, ...report });
-  } catch (err) {
-    console.error("[jobs] failed:", err);
-    return res.status(500).json({ error: String(err) });
-  }
-});
-
-// Single launched fleet by Linear identifier (e.g. /api/jobs/ENG-7). Same auth
-// and Linear-derived shape as /api/jobs; 404 when no fleet has launched for it.
-app.get("/api/jobs/:identifier", async (req: Req, res: Res) => {
-  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
-  try {
-    const job = await getJob(req.params.identifier);
-    if (!job) return res.status(404).json({ error: `no launched fleet for ${req.params.identifier}` });
-    return res.status(200).json({ ok: true, generatedAt: new Date().toISOString(), job });
-  } catch (err) {
-    console.error("[jobs] failed:", err);
-    return res.status(500).json({ error: String(err) });
-  }
-});
 
 app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });

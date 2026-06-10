@@ -6,23 +6,15 @@ import { ghOwner, markers, roleLabel, roleRepo, triggerLabel, triggerState } fro
 import { checkAgentRun, spawnAgent, type AgentRunStatus } from "./agents.js";
 import {
   addIssueReaction,
-  commentCreatedAt,
   deleteBridgeComments,
   hasComment,
-  latestBridgeCommentAt,
   listFleetIssues,
   parseDoneAgentIds,
   parseSpawnedAgents,
   postComment,
   removeIssueReaction,
 } from "./linear.js";
-import type {
-  JobSummary,
-  JobsReport,
-  LinearIssuePayload,
-  SpawnedAgent,
-  TriggerResult,
-} from "./types.js";
+import type { LinearIssuePayload, SpawnedAgent, TriggerResult } from "./types.js";
 
 /** Best-effort, per-instance guard against double-spawning while a trigger is in flight. */
 const activeIssues = new Set<string>();
@@ -90,72 +82,6 @@ export async function resetIssue(issueId: string): Promise<{ clearedComments: nu
   const clearedComments = await deleteBridgeComments(issueId);
   if (clearedComments > 0) console.log(`[reset] re-armed ${issueId} (cleared ${clearedComments} comment(s))`);
   return { clearedComments };
-}
-
-/**
- * Builds the read-only summary for one launched fleet from its Linear comments.
- * Pure (no network), so it is unit-testable. `startedAt`/`completedAt` come from
- * the fleet marker comments; `runningForSeconds` is the live age of an
- * in-progress fleet; `updatedAt` is the bridge's last activity on the issue.
- */
-export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSummary {
-  const done = parseDoneAgentIds(issue);
-  const agents = parseSpawnedAgents(issue).map((agent) => ({
-    ...agent,
-    done: done.has(agent.agentId),
-  }));
-  const startedAt = commentCreatedAt(issue, markers.fleetStarted);
-  const completedAt = commentCreatedAt(issue, markers.fleetComplete);
-  const status: JobSummary["status"] = completedAt ? "complete" : "in-progress";
-  const runningForSeconds =
-    status === "in-progress" && startedAt
-      ? Math.max(0, Math.round((nowMs - Date.parse(startedAt)) / 1000))
-      : undefined;
-  return {
-    identifier: issue.identifier,
-    title: issue.title,
-    url: issue.url,
-    state: issue.state?.name,
-    status,
-    startedAt,
-    completedAt,
-    updatedAt: latestBridgeCommentAt(issue),
-    runningForSeconds,
-    agents,
-    agentsPending: agents.filter((agent) => !agent.done).length,
-  };
-}
-
-/**
- * Read-only view of the fleets the bridge has launched, derived entirely from
- * Linear comment markers, with no Cursor SDK calls and no mutation. A "job" is
- * any fleet-labeled issue with the `fleetStarted` marker; it is `in-progress` until
- * the `fleetComplete` marker is posted. Defaults to in-progress jobs only; pass
- * `includeComplete` for finished fleets too. Counts span every launched fleet.
- */
-export async function listJobs(
-  options: { includeComplete?: boolean } = {},
-): Promise<JobsReport> {
-  const now = Date.now();
-  const issues = await listFleetIssues(triggerLabel);
-  const jobs = issues
-    .filter((issue) => hasComment(issue, markers.fleetStarted))
-    .map((issue) => summarizeJob(issue, now));
-  const inProgress = jobs.filter((job) => job.status === "in-progress");
-  return {
-    generatedAt: new Date(now).toISOString(),
-    inProgress: inProgress.length,
-    complete: jobs.length - inProgress.length,
-    agentsPending: inProgress.reduce((sum, job) => sum + job.agentsPending, 0),
-    jobs: options.includeComplete ? jobs : inProgress,
-  };
-}
-
-/** A single launched fleet by Linear identifier (case-insensitive), or null. */
-export async function getJob(identifier: string): Promise<JobSummary | null> {
-  const want = identifier.trim().toLowerCase();
-  const { jobs } = await listJobs({ includeComplete: true });
-  return jobs.find((job) => job.identifier.toLowerCase() === want) ?? null;
 }
 
 export interface ReconcileSummary {

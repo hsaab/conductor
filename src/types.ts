@@ -36,32 +36,3 @@ export interface SpawnedAgent {
   repo: string;
 }
 
-/** A spawned agent annotated with whether its completion was reported back. */
-export interface JobAgent extends SpawnedAgent {
-  /** True once a per-agent completion comment exists for this agent. */
-  done: boolean;
-}
-
-/** One launched fleet, derived entirely from an issue's Linear comments. */
-export interface JobSummary {
-  identifier: string;
-  title: string;
-  url?: string;
-  state?: string;
-  status: "in-progress" | "complete";
-  startedAt?: string;
-  completedAt?: string;
-  updatedAt?: string;
-  runningForSeconds?: number;
-  agents: JobAgent[];
-  agentsPending: number;
-}
-
-/** Read-only snapshot returned by the `/api/jobs` endpoint. */
-export interface JobsReport {
-  generatedAt: string;
-  inProgress: number;
-  complete: number;
-  agentsPending: number;
-  jobs: JobSummary[];
-}
