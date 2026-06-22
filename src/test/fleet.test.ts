@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { summarizeJob } from "./fleet.js";
-import { markers } from "./config.js";
-import type { LinearIssuePayload } from "./types.js";
+import { summarizeJob } from "../fleet.js";
+import { markers } from "../config.js";
+import type { LinearIssuePayload } from "../types.js";
 
 const NOW = Date.parse("2026-06-02T12:00:00.000Z");
-const heroSpawn = `${markers.bridge}\n**Cursor Hero agent spawned**\n\nAgent ID: \`bc-aaa-111\`\nRepo: \`hsaab/compound\``;
+const compoundSpawn = `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`bc-aaa-111\`\nRepo: \`hsaab/compound\``;
 
 function issue(comments: Array<{ body: string; createdAt?: string }>): LinearIssuePayload {
   return { id: "i", identifier: "ENG-9", title: "T", state: { name: "In Progress" }, comments };
@@ -16,7 +16,7 @@ test("summarizeJob reports an in-progress fleet's start time and elapsed seconds
   const job = summarizeJob(
     issue([
       { body: markers.fleetStarted, createdAt: "2026-06-02T11:58:00.000Z" },
-      { body: heroSpawn, createdAt: "2026-06-02T11:58:01.000Z" },
+      { body: compoundSpawn, createdAt: "2026-06-02T11:58:01.000Z" },
     ]),
     NOW,
   );
@@ -32,8 +32,8 @@ test("summarizeJob marks a fleet complete and drops the running clock", () => {
   const job = summarizeJob(
     issue([
       { body: markers.fleetStarted, createdAt: "2026-06-02T11:00:00.000Z" },
-      { body: heroSpawn, createdAt: "2026-06-02T11:00:01.000Z" },
-      { body: `${markers.agentDone("bc-aaa-111")}\n**Cursor Hero agent finished**`, createdAt: "2026-06-02T11:05:00.000Z" },
+      { body: compoundSpawn, createdAt: "2026-06-02T11:00:01.000Z" },
+      { body: `${markers.agentDone("bc-aaa-111")}\n**Cursor compound agent finished**`, createdAt: "2026-06-02T11:05:00.000Z" },
       { body: `${markers.fleetComplete}\n**Cursor fleet complete**`, createdAt: "2026-06-02T11:05:01.000Z" },
     ]),
     NOW,

@@ -1,7 +1,5 @@
 /** Shared domain types for the Linear ↔ Cursor bridge. */
 
-export type AgentRole = "hero" | "chorus";
-
 /** Normalized Linear issue shape used throughout the bridge. */
 export interface LinearIssuePayload {
   id: string;
@@ -31,7 +29,6 @@ export interface TriggerResult {
 
 /** A Cursor agent that was spawned for an issue, recovered from Linear comments. */
 export interface SpawnedAgent {
-  role: AgentRole;
   agentId: string;
   repo: string;
 }

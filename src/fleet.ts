@@ -1,8 +1,8 @@
 /**
- * Fleet orchestration: deciding when to spawn, launching agents (without
+ * Fleet orchestration: planning tasks from the ticket, launching agents (without
  * blocking on completion), and reconciling finished runs back into Linear.
  */
-import { ghOwner, markers, roleLabel, roleRepo, triggerLabel, triggerState } from "./config.js";
+import { markers, triggerLabel, triggerState } from "./config.js";
 import { checkAgentRun, spawnAgent, type AgentRunStatus } from "./agents.js";
 import {
   addIssueReaction,
@@ -16,6 +16,7 @@ import {
   postComment,
   removeIssueReaction,
 } from "./linear.js";
+import { planFleet } from "./planner.js";
 import type {
   JobSummary,
   JobsReport,
@@ -32,16 +33,18 @@ export function shouldSpawn(issue: LinearIssuePayload): boolean {
   return labels.includes(triggerLabel) && issue.state?.name === triggerState;
 }
 
-/** Markdown bullet list of the `owner/repo` targets for the "fleet accepted" comment. */
-function repoList(): string {
-  return (Object.values(roleRepo) as string[]).map((repo) => `- \`${ghOwner}/${repo}\``).join("\n");
+function repoShortName(repo: string): string {
+  return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
+}
+
+function planRepoList(repos: string[]): string {
+  return repos.map((repo) => `- \`${repo}\``).join("\n");
 }
 
 /**
- * Launches the two-agent fleet for an issue. Posts the durable `fleetStarted`
- * marker comment *before* spawning so concurrent or repeated triggers are
- * deduped via {@link hasComment}. Returns once both agents have been started —
- * it does not wait for the runs to finish (see {@link reconcileAll}).
+ * Plans tasks from the ticket, posts the durable `fleetStarted` marker, then
+ * spawns one cloud agent per planned task. Returns once all agents have been
+ * started — it does not wait for runs to finish (see {@link reconcileAll}).
  */
 export async function triggerFleet(
   issue: LinearIssuePayload,
@@ -57,22 +60,45 @@ export async function triggerFleet(
 
   activeIssues.add(issue.id);
   try {
-    console.log(`[${source}] spawning fleet for ${issue.identifier}`);
-    // Instant, visible demo signal: react on the issue and post the engaged
-    // comment before the (slower) agent spawns so dragging the ticket "does
-    // something" within ~1s.
+    console.log(
+      `[fleet] Engaging on ${issue.identifier} "${issue.title}" (trigger: ${source})`,
+    );
+
+    // Instant demo signal first: react and post the engaged marker before the
+    // (slower) planner agent runs, so dragging the ticket "does something" right
+    // away. The fleetStarted marker also dedupes concurrent/repeat triggers.
     await addIssueReaction(issue.id);
     await postComment(
       issue.id,
       `${markers.fleetStarted}
-**🚀 Cursor bridge engaged — spawning fleet**
+**🚀 Cursor bridge engaged — planning the fleet**
 
 Trigger: \`${source}\`
 Issue: ${issue.url ?? issue.identifier}
-Repos:
-${repoList()}`,
+
+A Cursor planner agent is reading the ticket to decide which repos need work.`,
     );
-    await Promise.all([spawnAgent("hero", issue), spawnAgent("chorus", issue)]);
+    console.log(`[fleet] Reacted 🚀 on ${issue.identifier}; planner agent is reading the ticket`);
+
+    const plan = await planFleet(issue);
+
+    await postComment(
+      issue.id,
+      `${markers.bridge}
+**🧭 Planner chose ${plan.length} agent(s)**
+
+Repos:
+${planRepoList(plan.map((t) => t.repo))}`,
+    );
+
+    console.log(
+      `[fleet] Launching ${plan.length} agent(s) for ${issue.identifier}: ${plan.map((t) => t.repo).join(", ")}`,
+    );
+    await Promise.all(plan.map((task) => spawnAgent(task, issue)));
+
+    console.log(
+      `[fleet] All ${plan.length} agent(s) running for ${issue.identifier} — PRs will open in each repo in a few minutes`,
+    );
     return { queued: true };
   } finally {
     activeIssues.delete(issue.id);
@@ -83,7 +109,6 @@ ${repoList()}`,
  * Re-arms an issue so a fresh drag into "In Progress" launches a new fleet:
  * removes the bridge's reaction and deletes all of its comments (which clears
  * the `fleetStarted` dedupe marker). Used when a ticket leaves "In Progress".
- * The agents' PRs on GitHub are untouched.
  */
 export async function resetIssue(issueId: string): Promise<{ clearedComments: number }> {
   await removeIssueReaction(issueId);
@@ -94,9 +119,7 @@ export async function resetIssue(issueId: string): Promise<{ clearedComments: nu
 
 /**
  * Builds the read-only summary for one launched fleet from its Linear comments.
- * Pure (no network), so it is unit-testable. `startedAt`/`completedAt` come from
- * the fleet marker comments; `runningForSeconds` is the live age of an
- * in-progress fleet; `updatedAt` is the bridge's last activity on the issue.
+ * Pure (no network), so it is unit-testable.
  */
 export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSummary {
   const done = parseDoneAgentIds(issue);
@@ -126,13 +149,6 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
   };
 }
 
-/**
- * Read-only view of the fleets the bridge has launched, derived entirely from
- * Linear comment markers, with no Cursor SDK calls and no mutation. A "job" is
- * any fleet-labeled issue with the `fleetStarted` marker; it is `in-progress` until
- * the `fleetComplete` marker is posted. Defaults to in-progress jobs only; pass
- * `includeComplete` for finished fleets too. Counts span every launched fleet.
- */
 export async function listJobs(
   options: { includeComplete?: boolean } = {},
 ): Promise<JobsReport> {
@@ -151,7 +167,6 @@ export async function listJobs(
   };
 }
 
-/** A single launched fleet by Linear identifier (case-insensitive), or null. */
 export async function getJob(identifier: string): Promise<JobSummary | null> {
   const want = identifier.trim().toLowerCase();
   const { jobs } = await listJobs({ includeComplete: true });
@@ -166,23 +181,17 @@ export interface ReconcileSummary {
 }
 
 function agentDoneComment(agent: SpawnedAgent, status: AgentRunStatus): string {
-  const label = roleLabel[agent.role];
+  const name = repoShortName(agent.repo);
   const headline = status.status === "finished" ? "finished" : status.status;
   const prLine = status.prUrl ? `PR: ${status.prUrl}` : "PR: (no PR opened)";
   return `${markers.agentDone(agent.agentId)}
-**Cursor ${label} agent ${headline}**
+**Cursor ${name} agent ${headline}**
 
 Agent ID: \`${agent.agentId}\`
 Repo: \`${agent.repo}\`
 ${prLine}`;
 }
 
-/**
- * Scans fleet issues for agents that finished but were never reported back to
- * Linear, posts their PR URLs, and adds a one-time "fleet complete" summary once
- * every agent on an issue has reported. Safe to run repeatedly and on a schedule
- * (Vercel Cron) — idempotency comes from the per-agent and fleet markers.
- */
 export async function reconcileAll(): Promise<ReconcileSummary> {
   const issues = await listFleetIssues(triggerLabel);
   const summary: ReconcileSummary = {
@@ -204,7 +213,10 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
       await postComment(issue.id, agentDoneComment(agent, status));
       done.add(agent.agentId);
       summary.agentsCompleted += 1;
-      console.log(`[reconcile] ${issue.identifier} ${agent.agentId} -> ${status.status} ${status.prUrl ?? ""}`);
+      const prNote = status.prUrl ? `PR: ${status.prUrl}` : "no PR opened";
+      console.log(
+        `[reconcile] ${repoShortName(agent.repo)} agent on ${agent.repo} ${status.status} → ${prNote} (posted to ${issue.identifier})`,
+      );
     }
 
     const allDone = spawned.length > 0 && spawned.every((agent) => done.has(agent.agentId));
@@ -215,6 +227,9 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
 **Cursor fleet complete** — ${spawned.length}/${spawned.length} agents finished.`,
       );
       summary.fleetsCompleted += 1;
+      console.log(
+        `[reconcile] ${issue.identifier} fleet complete — all ${spawned.length} agents finished and reported back to Linear`,
+      );
     }
   }
   return summary;

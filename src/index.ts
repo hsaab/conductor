@@ -5,7 +5,7 @@
  *  - GET  /api/health     liveness probe
  *  - GET  /api/jobs       secured read-only view of in-progress fleets
  *  - GET  /api/jobs/:id   single launched fleet by Linear identifier
- *  - POST /api/trigger    secured manual/poller fallback for the Linear webhook
+ *  - POST /api/trigger    secured manual fallback for the Linear webhook
  *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
  *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
  *  - POST /webhook/linear  Linear webhook (signature-verified)
@@ -36,10 +36,28 @@ async function handleWebhook(payload: {
   type: string;
   data: LinearIssuePayload;
 }): Promise<void> {
-  if (payload.type !== "Issue" || payload.action !== "update") return;
+  const identifier = payload.data?.identifier ?? payload.data?.id ?? "unknown";
+  console.log(`[webhook] Linear delivered a ${payload.type}.${payload.action} event for ${identifier}`);
+
+  if (payload.type !== "Issue" || payload.action !== "update") {
+    console.log(`[webhook] Ignoring ${identifier}: only Issue updates can start a fleet (got ${payload.type}.${payload.action})`);
+    return;
+  }
+
   const webhookIssue = normalizeIssue(payload.data);
+  const incomingState = webhookIssue.state?.name ?? "unknown";
+  console.log(
+    `[webhook] Ticket ${webhookIssue.identifier} "${webhookIssue.title}" was updated (state is now "${incomingState}")`,
+  );
+
   const isFleetLabeled = webhookIssue.labels?.some((l) => l.name === triggerLabel) ?? false;
-  if (!isFleetLabeled) return;
+  if (!isFleetLabeled) {
+    console.log(
+      `[webhook] Ignoring ${webhookIssue.identifier}: ticket is not labeled "${triggerLabel}", so the bridge stays out of it`,
+    );
+    return;
+  }
+  console.log(`[webhook] ${webhookIssue.identifier} is labeled "${triggerLabel}" — this ticket is ours to handle`);
 
   // Hydrate from the API so labels/comments/state reflect current truth.
   let issue = webhookIssue;
@@ -49,17 +67,32 @@ async function handleWebhook(payload: {
     console.error("[webhook] could not hydrate Linear issue:", err);
   }
 
+  const stateName = issue.state?.name ?? "unknown";
   if (shouldSpawn(issue)) {
+    console.log(
+      `[webhook] ${issue.identifier} is in "${triggerState}" — handing off to the fleet launcher`,
+    );
     const result = await triggerFleet(issue, "linear-webhook");
     if (!result.queued && result.reason) {
-      console.log(`[webhook] skipped ${issue.identifier}: ${result.reason}`);
+      console.log(`[webhook] No fleet launched for ${issue.identifier}: ${result.reason}`);
     }
-  } else if (hasComment(issue, markers.fleetStarted)) {
+    return;
+  }
+
+  if (hasComment(issue, markers.fleetStarted)) {
     // Ticket left "In Progress" carrying an active fleet record: re-arm it so a
     // future move back into "In Progress" launches a fresh fleet.
+    console.log(
+      `[webhook] ${issue.identifier} left "${triggerState}" (now "${stateName}") — re-arming it for a fresh run next time`,
+    );
     await resetIssue(issue.id);
-    console.log(`[webhook] re-armed ${issue.identifier} (left ${triggerState})`);
+    console.log(`[webhook] ${issue.identifier} re-armed: cleared the 🚀 reaction and bridge comments`);
+    return;
   }
+
+  console.log(
+    `[webhook] Nothing to do for ${issue.identifier}: it is in "${stateName}", not "${triggerState}"`,
+  );
 }
 
 const app = express();
@@ -125,8 +158,7 @@ app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
 });
 
 // Re-arms an issue (clears the bridge's comments + reaction) so dragging it
-// back into "In Progress" launches a fresh fleet. Driven by the poller when a
-// ticket leaves "In Progress". Authorized like /api/trigger.
+// back into "In Progress" launches a fresh fleet. Authorized like /api/trigger.
 app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
   const issueId = req.body?.issueId ?? req.body?.id;
@@ -142,8 +174,8 @@ app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
   }
 });
 
-// GET for Vercel Cron (the daily backstop); POST for the local poller's fast
-// driver. Both authenticate via {@link isAuthorizedReconcile}.
+// GET for Vercel Cron (daily backstop); POST for manual demo reconcile.
+// Both authenticate via {@link isAuthorizedReconcile}.
 app.all("/api/reconcile", async (req: Req, res: Res) => {
   if (!isAuthorizedReconcile(req)) return res.status(401).json({ error: "unauthorized" });
   try {
@@ -179,5 +211,5 @@ export default app;
 
 if (!process.env.VERCEL) {
   const port = Number(process.env.PORT ?? 3001);
-  app.listen(port, () => console.log(`cursor-demo-bridge listening on :${port}`));
+  app.listen(port, () => console.log(`conductor listening on :${port}`));
 }

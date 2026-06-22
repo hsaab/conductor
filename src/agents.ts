@@ -1,19 +1,20 @@
 /**
- * Cursor SDK interactions: building role-specific prompts, spawning cloud
- * agents (fire-and-forget), and recovering a previously-spawned agent's latest
- * run so the reconciler can report its PR back to Linear.
+ * Cursor SDK interactions: spawning cloud agents (fire-and-forget) and
+ * recovering a previously-spawned agent's latest run for the reconciler.
  */
 
-import { cursorKey, ghOwner, markers, modelId, roleLabel, roleRepo } from "./config.js";
+import { cursorKey, markers, modelId } from "./config.js";
 import { postComment } from "./linear.js";
-import type { AgentRole, LinearIssuePayload } from "./types.js";
+import type { PlannedTask } from "./planner.js";
+import type { LinearIssuePayload } from "./types.js";
 
-export function buildPrompt(issue: LinearIssuePayload, role: AgentRole): string {
+function buildPrompt(issue: LinearIssuePayload, task: PlannedTask): string {
   const ticket = `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? ""}`;
-  if (role === "hero") {
-    return `${ticket}\n\n## Role: Hero (compound)\n\nImplement the full ticket in ${ghOwner}/compound:\n- X-Request-ID middleware (read incoming header or generate UUID)\n- AsyncLocalStorage for request-scoped context\n- Structured logger includes requestId on every line\n- Small UI footer showing the current request ID\n- Tests for generated and echoed request IDs\n\nOpen a PR when done.`;
-  }
-  return `${ticket}\n\n## Role: Chorus (server / Bitwarden)\n\nScoped work in ${ghOwner}/server only:\n- ASP.NET middleware for X-Request-ID (read or generate, echo on response)\n- Serilog enricher via LogContext.PushProperty("RequestId", ...)\n- One xUnit test exercising middleware behavior\n\nNo UI changes. Open a PR when done.`;
+  return `${ticket}\n\n## Repo: ${task.repo}\n\n${task.instructions}\n\nOpen a PR when done.`;
+}
+
+function repoShortName(repo: string): string {
+  return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
 }
 
 /**
@@ -25,32 +26,34 @@ export function buildPrompt(issue: LinearIssuePayload, role: AgentRole): string 
  * reconciler reports completion + PR URL later. The spawn comment records the
  * agent id so the reconciler can find the run again.
  */
-export async function spawnAgent(role: AgentRole, issue: LinearIssuePayload): Promise<void> {
+export async function spawnAgent(task: PlannedTask, issue: LinearIssuePayload): Promise<void> {
   const { Agent, CursorAgentError } = await import("@cursor/sdk");
-  const repo = `${ghOwner}/${roleRepo[role]}`;
-  const label = roleLabel[role];
+  const name = repoShortName(task.repo);
+  console.log(
+    `[${name}] Starting a Cursor cloud agent on github.com/${task.repo} (model: ${modelId}) for ${issue.identifier}`,
+  );
   try {
     await using agent = await Agent.create({
       apiKey: cursorKey(),
       model: { id: modelId },
       cloud: {
-        repos: [{ url: `https://github.com/${repo}` }],
+        repos: [{ url: `https://github.com/${task.repo}` }],
         autoCreatePR: true,
         skipReviewerRequest: true,
       },
     });
-    const run = await agent.send(buildPrompt(issue, role));
-    console.log(`[${role}] spawned agent=${agent.agentId} run=${run.id}`);
+    const run = await agent.send(buildPrompt(issue, task));
+    console.log(
+      `[${name}] Launched on ${task.repo} — agent ${agent.agentId}, run ${run.id}. It will open a PR when finished.`,
+    );
     await postComment(
       issue.id,
-      `${markers.bridge}\n**Cursor ${label} agent spawned**\n\nAgent ID: \`${agent.agentId}\`\nRepo: \`${repo}\``,
+      `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`${agent.agentId}\`\nRepo: \`${task.repo}\``,
     );
   } catch (err) {
-    // A thrown error here means the run never started (auth/config/network),
-    // distinct from a run that starts and later fails.
     const msg = err instanceof CursorAgentError ? `startup failed: ${err.message}` : String(err);
-    console.error(`[${role}] ${msg}`);
-    await postComment(issue.id, `${markers.bridge}\n**Cursor ${label} agent failed to start**\n\n${msg}`);
+    console.error(`[${name}] Failed to start on ${task.repo}: ${msg}`);
+    await postComment(issue.id, `${markers.bridge}\n**Cursor agent failed to start**\n\nRepo: \`${task.repo}\`\n\n${msg}`);
   }
 }
 

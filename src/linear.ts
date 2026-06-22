@@ -6,9 +6,8 @@
  * parsers turn a fetched issue's comments back into structured agent records.
  */
 import crypto from "node:crypto";
-import { ghOwner, linearKey, reactionEmoji, roleRepo } from "./config.js";
+import { linearKey, reactionEmoji } from "./config.js";
 import type {
-  AgentRole,
   LinearConnection,
   LinearIssuePayload,
   LinearIssueRecord,
@@ -17,7 +16,7 @@ import type {
 
 const AGENT_ID_RE = /Agent ID:\s*`(bc-[0-9a-zA-Z_-]+)`/;
 const REPO_RE = /Repo:\s*`([^`]+)`/;
-const DONE_MARKER_RE = /cursor-demo-bridge:agent-done id=(bc-[0-9a-zA-Z_-]+)/g;
+const DONE_MARKER_RE = /conductor:agent-done id=(bc-[0-9a-zA-Z_-]+)/g;
 
 export async function linearGraphql<T>(
   query: string,
@@ -130,11 +129,10 @@ export function parseSpawnedAgents(issue: LinearIssuePayload): SpawnedAgent[] {
     const body = comment.body ?? "";
     if (!/agent spawned/i.test(body)) continue;
     const agentId = body.match(AGENT_ID_RE)?.[1];
-    if (!agentId || seen.has(agentId)) continue;
-    const role: AgentRole = /Hero/i.test(body) ? "hero" : "chorus";
-    const repo = body.match(REPO_RE)?.[1] ?? `${ghOwner}/${roleRepo[role]}`;
+    const repo = body.match(REPO_RE)?.[1];
+    if (!agentId || !repo || seen.has(agentId)) continue;
     seen.add(agentId);
-    agents.push({ role, agentId, repo });
+    agents.push({ agentId, repo });
   }
   return agents;
 }
@@ -155,9 +153,10 @@ export function parseDoneAgentIds(issue: LinearIssuePayload): Set<string> {
  * spawned" notices) — otherwise the reconciler would keep re-reporting them.
  */
 const BRIDGE_SIGNATURES = [
-  /cursor-demo-bridge/,
-  /Cursor (Hero|Chorus) agent (spawned|finished|failed)/i,
-  /Cursor (fleet|bridge) (accepted|complete|engaged)/i,
+  /conductor/,
+  /cursor-demo-bridge/, // legacy marker, so reset still cleans comments from older deploys
+  /Cursor .*agent (spawned|finished|failed)/i,
+  /Cursor (fleet|bridge|conductor) (accepted|complete|engaged)/i,
 ];
 
 export function isBridgeComment(body: string | null | undefined): boolean {
@@ -171,7 +170,7 @@ export function isBridgeComment(body: string | null | undefined): boolean {
  * without having to look it up.
  */
 export function bridgeReactionId(issueId: string): string {
-  const h = crypto.createHash("sha256").update(`cursor-demo-bridge:reaction:${issueId}`).digest("hex");
+  const h = crypto.createHash("sha256").update(`conductor:reaction:${issueId}`).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 

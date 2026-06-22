@@ -14,9 +14,9 @@ import {
   isBridgeComment,
   parseDoneAgentIds,
   parseSpawnedAgents,
-} from "./linear.js";
-import { markers } from "./config.js";
-import type { LinearIssuePayload } from "./types.js";
+} from "../linear.js";
+import { markers } from "../config.js";
+import type { LinearIssuePayload } from "../types.js";
 
 function issueWith(bodies: string[]): LinearIssuePayload {
   return {
@@ -27,39 +27,39 @@ function issueWith(bodies: string[]): LinearIssuePayload {
   };
 }
 
-const heroSpawn = "**Cursor Hero agent spawned**\n\nAgent ID: `bc-aaa-111`\nRepo: `hsaab/compound`";
-const chorusSpawn = "**Cursor Chorus agent spawned**\n\nAgent ID: `bc-bbb-222`\nRepo: `hsaab/server`";
+const compoundSpawn = "**Cursor agent spawned**\n\nAgent ID: `bc-aaa-111`\nRepo: `hsaab/compound`";
+const serverSpawn = "**Cursor agent spawned**\n\nAgent ID: `bc-bbb-222`\nRepo: `hsaab/server`";
+const legacyHeroSpawn = "**Cursor Hero agent spawned**\n\nAgent ID: `bc-ccc-333`\nRepo: `hsaab/compound`";
 
-test("parseSpawnedAgents extracts role, id, and repo from spawn comments", () => {
-  const agents = parseSpawnedAgents(issueWith([markers.fleetStarted, heroSpawn, chorusSpawn]));
+test("parseSpawnedAgents extracts agent id and repo from spawn comments", () => {
+  const agents = parseSpawnedAgents(issueWith([markers.fleetStarted, compoundSpawn, serverSpawn]));
   assert.deepEqual(agents, [
-    { role: "hero", agentId: "bc-aaa-111", repo: "hsaab/compound" },
-    { role: "chorus", agentId: "bc-bbb-222", repo: "hsaab/server" },
+    { agentId: "bc-aaa-111", repo: "hsaab/compound" },
+    { agentId: "bc-bbb-222", repo: "hsaab/server" },
   ]);
 });
 
-test("parseSpawnedAgents falls back to the role's default repo when none is listed", () => {
+test("parseSpawnedAgents skips spawn comments without a repo line", () => {
   const agents = parseSpawnedAgents(
-    issueWith(["**Cursor Hero agent spawned**\n\nAgent ID: `bc-aaa-111`"]),
+    issueWith(["**Cursor agent spawned**\n\nAgent ID: `bc-aaa-111`"]),
   );
-  assert.equal(agents.length, 1);
-  assert.equal(agents[0].repo, "hsaab/compound");
+  assert.deepEqual(agents, []);
 });
 
 test("parseSpawnedAgents de-duplicates repeated agent ids", () => {
-  const agents = parseSpawnedAgents(issueWith([heroSpawn, heroSpawn]));
+  const agents = parseSpawnedAgents(issueWith([compoundSpawn, compoundSpawn]));
   assert.equal(agents.length, 1);
 });
 
 test("parseSpawnedAgents ignores completion comments", () => {
-  const done = `${markers.agentDone("bc-aaa-111")}\n**Cursor Hero agent finished**`;
+  const done = `${markers.agentDone("bc-aaa-111")}\n**Cursor compound agent finished**`;
   assert.deepEqual(parseSpawnedAgents(issueWith([done])), []);
 });
 
 test("parseDoneAgentIds reads agent-done markers", () => {
   const issue = issueWith([
-    heroSpawn,
-    `${markers.agentDone("bc-aaa-111")}\n**Cursor Hero agent finished**`,
+    compoundSpawn,
+    `${markers.agentDone("bc-aaa-111")}\n**Cursor compound agent finished**`,
   ]);
   const done = parseDoneAgentIds(issue);
   assert.ok(done.has("bc-aaa-111"));
@@ -76,11 +76,9 @@ test("isBridgeComment recognizes every bridge marker and ignores user comments",
   assert.ok(isBridgeComment(markers.fleetStarted));
   assert.ok(isBridgeComment(markers.fleetComplete));
   assert.ok(isBridgeComment(markers.agentDone("bc-aaa-111")));
-  assert.ok(isBridgeComment(`${markers.bridge}\n**Cursor Hero agent spawned**`));
-  // Legacy comments (pre-marker) must still be recognized by content signature
-  // so reset removes them instead of leaving them to be re-reported.
-  assert.ok(isBridgeComment(heroSpawn));
-  assert.ok(isBridgeComment("**Cursor fleet accepted**\n\nTrigger: `linear-poller`"));
+  assert.ok(isBridgeComment(`${markers.bridge}\n**Cursor agent spawned**`));
+  assert.ok(isBridgeComment(legacyHeroSpawn));
+  assert.ok(isBridgeComment("**Cursor fleet accepted**\n\nTrigger: `linear-webhook`"));
   assert.ok(!isBridgeComment("Looks good to me, shipping this."));
   assert.ok(!isBridgeComment(null));
 });
