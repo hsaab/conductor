@@ -146,6 +146,28 @@ export function parseDoneAgentIds(issue: LinearIssuePayload): Set<string> {
   return ids;
 }
 
+const PR_URL_RE = /PR:\s*(https?:\/\/[^\s)]+)/i;
+const DONE_ID_RE = /conductor:agent-done id=(bc-[0-9a-zA-Z_-]+)/;
+
+/** Maps each completed agent id to the PR URL parsed from its completion comment. */
+export function parseAgentResults(issue: LinearIssuePayload): Map<string, { prUrl?: string }> {
+  const results = new Map<string, { prUrl?: string }>();
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    const id = body.match(DONE_ID_RE)?.[1];
+    if (!id) continue;
+    results.set(id, { prUrl: body.match(PR_URL_RE)?.[1] });
+  }
+  return results;
+}
+
+/** True when any conductor comment reports an agent that failed to start or errored. */
+export function hasFailedAgent(issue: LinearIssuePayload): boolean {
+  return (
+    issue.comments?.some((c) => /(failed to start|agent .*(error|cancelled))/i.test(c.body ?? "")) ?? false
+  );
+}
+
 /**
  * True for any comment the bridge authored. Newer comments carry a hidden
  * `cursor-demo-bridge` marker, but we also match by content signature so reset

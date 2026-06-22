@@ -11,9 +11,25 @@
 import { cursorKey, ghOwner, maxAgents, plannerModelId } from "./config.js";
 import type { LinearIssuePayload } from "./types.js";
 
+/**
+ * The kind of work a task represents. The planner classifies each task so the
+ * fleet agent can invoke the matching compound skill and workflow emphasis.
+ */
+export type TaskKind = "feature" | "bug" | "test";
+
+const TASK_KINDS: readonly TaskKind[] = ["feature", "bug", "test"];
+
+/** Normalizes any free-form kind string to a known {@link TaskKind}. */
+export function normalizeKind(value: unknown): TaskKind {
+  const kind = String(value ?? "").trim().toLowerCase();
+  return (TASK_KINDS as readonly string[]).includes(kind) ? (kind as TaskKind) : "feature";
+}
+
 export interface PlannedTask {
   repo: string;
   instructions: string;
+  /** Workflow class for this task; drives skill selection in the fleet agent. */
+  kind: TaskKind;
 }
 
 /** Optional hints for the planner + a safe fallback when planning fails. */
@@ -38,7 +54,7 @@ export function sanitizePlan(tasks: PlannedTask[]): PlannedTask[] {
     const repo = name.includes("/") ? name : `${ghOwner}/${name}`;
     if (seen.has(repo)) continue;
     seen.add(repo);
-    out.push({ repo, instructions: task.instructions.trim() });
+    out.push({ repo, instructions: task.instructions.trim(), kind: normalizeKind(task.kind) });
     if (out.length >= maxAgents) break;
   }
   return out;
@@ -58,8 +74,12 @@ export function parsePlanText(text: string): PlannedTask[] {
     const tasksRaw = (parsed as { tasks?: unknown }).tasks;
     if (!Array.isArray(tasksRaw)) return [];
     return tasksRaw.map((entry) => {
-      const obj = (entry ?? {}) as { repo?: unknown; instructions?: unknown };
-      return { repo: String(obj.repo ?? ""), instructions: String(obj.instructions ?? "") };
+      const obj = (entry ?? {}) as { repo?: unknown; instructions?: unknown; kind?: unknown };
+      return {
+        repo: String(obj.repo ?? ""),
+        instructions: String(obj.instructions ?? ""),
+        kind: normalizeKind(obj.kind),
+      };
     });
   } catch {
     return [];
@@ -74,6 +94,12 @@ function buildPlannerPrompt(issue: LinearIssuePayload): string {
 Read the Linear ticket below and decide which GitHub repos need work. Return one task per repo that should change. The number of tasks is up to you — match what the ticket actually needs (1 repo means 1 task, 3 repos means 3 tasks).
 
 Extract repo names from the ticket text when present (e.g. a "Repos:" line or repos mentioned in the description). You may also pick repos from the known hints if the ticket implies them but does not name them explicitly.
+
+Classify each task with a "kind" that drives which workflow the build agent runs:
+- "feature": build or extend functionality (the default).
+- "bug": diagnose and fix a defect; prioritize reading logs/errors and a minimal targeted fix.
+- "test": add or migrate tests; prioritize coverage and test infrastructure.
+Infer the kind from the ticket: labels like "bug"/"defect" or words like "fix", "broken", "regression", "error" imply "bug"; labels like "test"/"qa" or words like "coverage", "migrate tests" imply "test"; otherwise "feature".
 
 Ticket:
 - ID: ${issue.identifier}
@@ -90,17 +116,27 @@ ${hints}
 You are ONLY planning. Do not modify files, run commands, or open a pull request — just answer.
 
 Respond with ONLY a JSON object, no prose and no markdown fences, in exactly this shape:
-{"tasks":[{"repo":"owner/repo","instructions":"concrete implementation steps for this repo only"}]}`;
+{"tasks":[{"repo":"owner/repo","kind":"feature|bug|test","instructions":"concrete implementation steps for this repo only"}]}`;
 }
 
 function defaultInstructions(issue: LinearIssuePayload): string {
   return `Implement the ticket scope in this repo.\n\n# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? ""}\n\nOpen a PR when done.`;
 }
 
+/** Heuristic classification used by the fallback plan when the planner agent is unavailable. */
+function inferKindFromIssue(issue: LinearIssuePayload): TaskKind {
+  const haystack = `${issue.title} ${issue.description ?? ""} ${issue.labels?.map((l) => l.name).join(" ") ?? ""}`.toLowerCase();
+  if (/\b(bug|defect|fix|broken|regression|error|crash|incident|hotfix)\b/.test(haystack)) return "bug";
+  if (/\b(test|tests|qa|coverage|spec|e2e)\b/.test(haystack)) return "test";
+  return "feature";
+}
+
 function fallbackPlan(issue: LinearIssuePayload): PlannedTask[] {
+  const kind = inferKindFromIssue(issue);
   return knownRepos.map((r) => ({
     repo: `${ghOwner}/${r.repo}`,
     instructions: defaultInstructions(issue),
+    kind,
   }));
 }
 
@@ -128,7 +164,7 @@ export async function planFleet(issue: LinearIssuePayload): Promise<PlannedTask[
     if (result.status === "finished" && result.result) {
       const plan = sanitizePlan(parsePlanText(result.result));
       if (plan.length) {
-        console.log(`[planner] Plan: ${plan.length} agent(s) → ${plan.map((t) => t.repo).join(", ")}`);
+        console.log(`[planner] Plan: ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`);
         return plan;
       }
       console.log("[planner] Could not parse a plan from the agent reply, using fallback");
@@ -139,6 +175,6 @@ export async function planFleet(issue: LinearIssuePayload): Promise<PlannedTask[
     console.error("[planner] Planning failed, using fallback:", err);
   }
   const plan = fallbackPlan(issue);
-  console.log(`[planner] Fallback plan: ${plan.length} agent(s) → ${plan.map((t) => t.repo).join(", ")}`);
+  console.log(`[planner] Fallback plan: ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`);
   return plan;
 }

@@ -28,6 +28,53 @@ test("summarizeJob reports an in-progress fleet's start time and elapsed seconds
   assert.equal(job.agentsPending, 1);
 });
 
+test("summarizeJob derives pipeline stages: build running while agents pending", () => {
+  const job = summarizeJob(
+    issue([{ body: markers.fleetStarted }, { body: compoundSpawn }]),
+    NOW,
+  );
+  assert.equal(job.stages.plan, "done");
+  assert.equal(job.stages.build, "running");
+  assert.equal(job.stages.review, "pending");
+  assert.equal(job.stages.deploy, "pending");
+});
+
+test("summarizeJob derives deploy/observe stages from markers", () => {
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}\nPR: https://github.com/hsaab/compound/pull/7` },
+      { body: markers.fleetComplete },
+      { body: markers.deployed },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.build, "done");
+  assert.equal(job.stages.review, "done");
+  assert.equal(job.stages.merge, "done");
+  assert.equal(job.stages.deploy, "done");
+  assert.equal(job.stages.observe, "running");
+  assert.equal(job.agents[0].prUrl, "https://github.com/hsaab/compound/pull/7");
+});
+
+test("summarizeJob marks observe done and remediate done from markers", () => {
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}` },
+      { body: markers.fleetComplete },
+      { body: markers.deployed },
+      { body: markers.verified },
+      { body: markers.remediated },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.observe, "done");
+  assert.equal(job.stages.remediate, "done");
+});
+
 test("summarizeJob marks a fleet complete and drops the running clock", () => {
   const job = summarizeJob(
     issue([

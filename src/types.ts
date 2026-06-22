@@ -37,7 +37,12 @@ export interface SpawnedAgent {
 export interface JobAgent extends SpawnedAgent {
   /** True once a per-agent completion comment exists for this agent. */
   done: boolean;
+  /** PR URL parsed from the agent's completion comment, when present. */
+  prUrl?: string;
 }
+
+/** Status of a single pipeline stage, used by the mission-control dashboard. */
+export type StageState = "pending" | "running" | "done" | "failed";
 
 /** One launched fleet, derived entirely from an issue's Linear comments. */
 export interface JobSummary {
@@ -52,6 +57,8 @@ export interface JobSummary {
   runningForSeconds?: number;
   agents: JobAgent[];
   agentsPending: number;
+  /** Per-stage status for the mission-control dashboard, keyed by pipeline stage. */
+  stages: Record<string, StageState>;
 }
 
 /** Read-only snapshot returned by the `/api/jobs` endpoint. */

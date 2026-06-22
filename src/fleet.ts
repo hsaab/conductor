@@ -9,19 +9,23 @@ import {
   commentCreatedAt,
   deleteBridgeComments,
   hasComment,
+  hasFailedAgent,
   latestBridgeCommentAt,
   listFleetIssues,
+  parseAgentResults,
   parseDoneAgentIds,
   parseSpawnedAgents,
   postComment,
   removeIssueReaction,
 } from "./linear.js";
-import { planFleet } from "./planner.js";
+import { planFleet, type PlannedTask } from "./planner.js";
 import type {
+  JobAgent,
   JobSummary,
   JobsReport,
   LinearIssuePayload,
   SpawnedAgent,
+  StageState,
   TriggerResult,
 } from "./types.js";
 
@@ -37,8 +41,8 @@ function repoShortName(repo: string): string {
   return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
 }
 
-function planRepoList(repos: string[]): string {
-  return repos.map((repo) => `- \`${repo}\``).join("\n");
+function planTaskList(tasks: PlannedTask[]): string {
+  return tasks.map((task) => `- \`${task.repo}\` (${task.kind})`).join("\n");
 }
 
 /**
@@ -88,7 +92,7 @@ A Cursor planner agent is reading the ticket to decide which repos need work.`,
 **🧭 Planner chose ${plan.length} agent(s)**
 
 Repos:
-${planRepoList(plan.map((t) => t.repo))}`,
+${planTaskList(plan)}`,
     );
 
     console.log(
@@ -118,14 +122,44 @@ export async function resetIssue(issueId: string): Promise<{ clearedComments: nu
 }
 
 /**
+ * Derives each pipeline stage's status purely from the issue's comment markers,
+ * so the dashboard stays consistent with the rest of conductor's state store.
+ *
+ * The marker thread only directly records plan/build/deploy/observe/remediate;
+ * review and merge are inferred from their neighbors (a PR exists once the build
+ * is done, and a deploy only happens after a human merges).
+ */
+function deriveStages(issue: LinearIssuePayload, agents: JobAgent[]): Record<string, StageState> {
+  const started = hasComment(issue, markers.fleetStarted);
+  const spawned = agents.length > 0;
+  const allDone = spawned && agents.every((agent) => agent.done);
+  const failed = hasFailedAgent(issue);
+  const deployed = hasComment(issue, markers.deployed);
+  const verified = hasComment(issue, markers.verified);
+  const remediated = hasComment(issue, markers.remediated);
+
+  return {
+    plan: !started ? "pending" : spawned ? "done" : "running",
+    build: failed ? "failed" : !spawned ? "pending" : allDone ? "done" : "running",
+    review: !allDone ? "pending" : deployed ? "done" : "running",
+    merge: deployed ? "done" : allDone ? "running" : "pending",
+    deploy: deployed ? "done" : "pending",
+    observe: !deployed ? "pending" : verified ? "done" : "running",
+    remediate: remediated ? "done" : "pending",
+  };
+}
+
+/**
  * Builds the read-only summary for one launched fleet from its Linear comments.
  * Pure (no network), so it is unit-testable.
  */
 export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSummary {
   const done = parseDoneAgentIds(issue);
-  const agents = parseSpawnedAgents(issue).map((agent) => ({
+  const results = parseAgentResults(issue);
+  const agents: JobAgent[] = parseSpawnedAgents(issue).map((agent) => ({
     ...agent,
     done: done.has(agent.agentId),
+    prUrl: results.get(agent.agentId)?.prUrl,
   }));
   const startedAt = commentCreatedAt(issue, markers.fleetStarted);
   const completedAt = commentCreatedAt(issue, markers.fleetComplete);
@@ -146,6 +180,7 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
     runningForSeconds,
     agents,
     agentsPending: agents.filter((agent) => !agent.done).length,
+    stages: deriveStages(issue, agents),
   };
 }
 

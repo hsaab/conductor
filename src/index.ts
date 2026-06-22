@@ -2,13 +2,17 @@
  * HTTP surface for the Linear ↔ Cursor bridge.
  *
  * Routes:
+ *  - GET  /              mission-control dashboard (public, read-only)
  *  - GET  /api/health     liveness probe
+ *  - GET  /api/board      public read-only fleet status for the dashboard
  *  - GET  /api/jobs       secured read-only view of in-progress fleets
  *  - GET  /api/jobs/:id   single launched fleet by Linear identifier
  *  - POST /api/trigger    secured manual fallback for the Linear webhook
  *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
  *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
  *  - POST /webhook/linear  Linear webhook (signature-verified)
+ *  - POST /webhook/vercel  Vercel deployment webhook -> observability agent
+ *  - POST /webhook/datadog Datadog monitor webhook -> remediation agent
  *
  * Spawning is fast and synchronous-ish; completion is handled out-of-band by the
  * reconciler so no request ever blocks on a multi-minute agent run.
@@ -23,6 +27,7 @@ import { waitUntil } from "@vercel/functions";
 type Req = any;
 type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
+import { dashboardHtml } from "./dashboard.js";
 import { fetchIssue, hasComment, normalizeIssue } from "./linear.js";
 import { getJob, listJobs, reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
 import { isAuthorizedReconcile, isAuthorizedTrigger, verifyLinearSignature } from "./security.js";
@@ -97,7 +102,27 @@ async function handleWebhook(payload: {
 
 const app = express();
 
+// Mission-control dashboard (public, read-only). Screen-shared during the demo
+// so the wait for cloud agents becomes part of the show.
+app.get("/", (_req: Req, res: Res) => {
+  res.status(200).set("Content-Type", "text/html; charset=utf-8").send(dashboardHtml);
+});
+
 app.get("/api/health", (_req: Req, res: Res) => res.status(200).json({ ok: true }));
+
+// Public, read-only data source for the dashboard. Same Linear-derived shape as
+// /api/jobs but unauthenticated so the page can poll it without exposing a secret
+// in the browser. Returns only non-sensitive pipeline state (no keys/tokens).
+app.get("/api/board", async (req: Req, res: Res) => {
+  try {
+    const includeComplete = req.query.all === "1" || req.query.all === "true";
+    const report = await listJobs({ includeComplete });
+    return res.status(200).set("Cache-Control", "no-store").json({ ok: true, ...report });
+  } catch (err) {
+    console.error("[board] failed:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
 
 // Read-only snapshot of launched fleets, reconstructed from Linear comments
 // (no Cursor SDK calls, no mutation). In-progress only by default; pass
