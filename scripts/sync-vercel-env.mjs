@@ -7,7 +7,7 @@
  * Empty values are skipped, so you can run it before every secret is filled in
  * and run it again later to push the rest.
  *
- * Usage (from a linked project dir, e.g. cursor-demo-bridge/ or compound/):
+ * Usage (from a linked project dir, e.g. conductor/ or compound/):
  *   node scripts/sync-vercel-env.mjs [envFile] [targets]
  *     envFile  path to the .env file        (default: .env)
  *     targets  comma list of environments   (default: production)
