@@ -72,7 +72,9 @@ const headers = bearerToken
     };
 console.log(`Auth: ${bearerToken ? "access token (Bearer)" : "api+app key"} · Site: ${DD_SITE}\n`);
 
-const WEBHOOK_NAME = "conductor-datadog";
+// Must match the installed Datadog webhook + the synthetic alert handle
+// (@webhook-<name>). This is the webhook conductor's /webhook/datadog receives.
+const WEBHOOK_NAME = "conductor_cursor_automation";
 const targetUrl = `${COMPOUND_URL.replace(/\/$/, "")}/api/market/quotes-check`;
 const conductorWebhookUrl = `${CONDUCTOR_URL.replace(/\/$/, "")}/webhook/datadog?secret=${encodeURIComponent(DATADOG_WEBHOOK_SECRET)}`;
 

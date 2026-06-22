@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /** Register Linear webhook. Usage: LINEAR_API_KEY=... WEBHOOK_URL=... LINEAR_WEBHOOK_SECRET=... node scripts/register-linear-webhook.mjs */
 const apiKey = process.env.LINEAR_API_KEY;
-const url = process.env.WEBHOOK_URL ?? "https://conductor.vercel.app/webhook/linear";
+const url = process.env.WEBHOOK_URL ?? "https://conductor-factory.vercel.app/webhook/linear";
 const secret = process.env.LINEAR_WEBHOOK_SECRET;
 if (!apiKey || !secret) {
   console.error("Set LINEAR_API_KEY and LINEAR_WEBHOOK_SECRET");
