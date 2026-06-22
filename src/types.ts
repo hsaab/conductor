@@ -39,6 +39,8 @@ export interface JobAgent extends SpawnedAgent {
   done: boolean;
   /** PR URL parsed from the agent's completion comment, when present. */
   prUrl?: string;
+  /** Which pipeline phase spawned this agent. */
+  role: "build" | "remediation";
 }
 
 /** Status of a single pipeline stage, used by the mission-control dashboard. */

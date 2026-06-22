@@ -29,6 +29,15 @@ export const vercelWebhookSecret = (): string => process.env.VERCEL_WEBHOOK_SECR
 /** Shared secret guarding the Datadog monitor webhook (`/webhook/datadog`). */
 export const datadogWebhookSecret = (): string => process.env.DATADOG_WEBHOOK_SECRET ?? "";
 
+/** Datadog API key for conductor's own health queries (optional). */
+export const datadogApiKey = (): string => process.env.DD_API_KEY ?? "";
+
+/** Datadog application key for conductor's own health queries (optional). */
+export const datadogAppKey = (): string => process.env.DD_APP_KEY ?? "";
+
+/** Datadog site (e.g. datadoghq.com, us5.datadoghq.com). Defaults to US1. */
+export const datadogSite = (): string => process.env.DD_SITE ?? "datadoghq.com";
+
 /** Cloud model used for every spawned agent. Override with `BRIDGE_MODEL_ID`. */
 export const modelId = process.env.BRIDGE_MODEL_ID ?? "composer-2.5";
 
@@ -62,8 +71,12 @@ export const markers = {
   verified: "<!-- conductor:verified -->",
   /** Posted when a stage result has been announced to Slack. */
   announced: "<!-- conductor:announced -->",
-  /** Posted when the remediation agent has opened a hotfix PR for a prod alert. */
+  /** Posted when a Datadog alert has dispatched a remediation agent (stage begins). */
   remediated: "<!-- conductor:remediated -->",
+  /** Marks a dispatched remediation agent. Distinct from build "agent spawned" so it never counts as a build agent. */
+  remediationSpawned: (agentId: string): string => `<!-- conductor:remediation-agent id=${agentId} -->`,
+  /** Per-remediation-agent completion marker carrying the hotfix PR. */
+  remediationDone: (agentId: string): string => `<!-- conductor:remediation-done id=${agentId} -->`,
 };
 
 /**

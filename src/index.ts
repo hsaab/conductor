@@ -30,7 +30,15 @@ import { markers, triggerLabel, triggerState } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
 import { fetchIssue, hasComment, normalizeIssue } from "./linear.js";
 import { getJob, listJobs, reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
-import { isAuthorizedReconcile, isAuthorizedTrigger, verifyLinearSignature } from "./security.js";
+import { handleVercelDeployment } from "./observability.js";
+import { handleDatadogAlert } from "./remediation.js";
+import {
+  isAuthorizedDatadog,
+  isAuthorizedReconcile,
+  isAuthorizedTrigger,
+  isAuthorizedVercel,
+  verifyLinearSignature,
+} from "./security.js";
 import type { LinearIssuePayload } from "./types.js";
 
 /** Best-effort, per-instance dedupe of webhook redeliveries. */
@@ -229,6 +237,34 @@ app.post("/webhook/linear", express.raw({ type: "*/*" }), (req: Req, res: Res) =
     handleWebhook(JSON.parse(rawBody.toString())).catch((err) =>
       console.error("[webhook] handler error:", err),
     ),
+  );
+});
+
+// Vercel deployment webhook. On a successful production deploy of the target
+// project, conductor verifies health and announces to Slack (observability stage).
+app.post("/webhook/vercel", express.json({ limit: "1mb" }), (req: Req, res: Res) => {
+  if (!isAuthorizedVercel(req)) return res.status(401).json({ error: "unauthorized" });
+  const type = req.body?.type ?? "(none)";
+  if (type !== "deployment.succeeded") {
+    return res.status(200).json({ ok: true, ignored: `event ${type}` });
+  }
+  res.status(202).json({ ok: true });
+  waitUntil(
+    handleVercelDeployment(req.body)
+      .then((r) => console.log(`[webhook/vercel] ${r.handled ? "handled" : "skipped"}${r.reason ? `: ${r.reason}` : ""}`))
+      .catch((err) => console.error("[webhook/vercel] handler error:", err)),
+  );
+});
+
+// Datadog monitor webhook. On a production alert (latency/errors), conductor
+// spawns the remediation agent to diagnose and open a hotfix PR.
+app.post("/webhook/datadog", express.json({ limit: "1mb" }), (req: Req, res: Res) => {
+  if (!isAuthorizedDatadog(req)) return res.status(401).json({ error: "unauthorized" });
+  res.status(202).json({ ok: true });
+  waitUntil(
+    handleDatadogAlert(req.body)
+      .then((r) => console.log(`[webhook/datadog] ${r.handled ? "handled" : "skipped"}${r.reason ? `: ${r.reason}` : ""}`))
+      .catch((err) => console.error("[webhook/datadog] handler error:", err)),
   );
 });
 

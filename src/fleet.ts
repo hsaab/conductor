@@ -10,15 +10,20 @@ import {
   deleteBridgeComments,
   hasComment,
   hasFailedAgent,
+  hasRemediationDone,
   latestBridgeCommentAt,
   listFleetIssues,
   parseAgentResults,
   parseDoneAgentIds,
+  parseRemediationAgents,
+  parseRemediationDoneIds,
+  parseRemediationResults,
   parseSpawnedAgents,
   postComment,
   removeIssueReaction,
 } from "./linear.js";
 import { planFleet, type PlannedTask } from "./planner.js";
+import { postSlack, statusBlocks } from "./slack.js";
 import type {
   JobAgent,
   JobSummary,
@@ -129,14 +134,15 @@ export async function resetIssue(issueId: string): Promise<{ clearedComments: nu
  * review and merge are inferred from their neighbors (a PR exists once the build
  * is done, and a deploy only happens after a human merges).
  */
-function deriveStages(issue: LinearIssuePayload, agents: JobAgent[]): Record<string, StageState> {
+function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Record<string, StageState> {
   const started = hasComment(issue, markers.fleetStarted);
-  const spawned = agents.length > 0;
-  const allDone = spawned && agents.every((agent) => agent.done);
+  const spawned = buildAgents.length > 0;
+  const allDone = spawned && buildAgents.every((agent) => agent.done);
   const failed = hasFailedAgent(issue);
   const deployed = hasComment(issue, markers.deployed);
   const verified = hasComment(issue, markers.verified);
   const remediated = hasComment(issue, markers.remediated);
+  const remediationDone = hasRemediationDone(issue);
 
   return {
     plan: !started ? "pending" : spawned ? "done" : "running",
@@ -145,7 +151,7 @@ function deriveStages(issue: LinearIssuePayload, agents: JobAgent[]): Record<str
     merge: deployed ? "done" : allDone ? "running" : "pending",
     deploy: deployed ? "done" : "pending",
     observe: !deployed ? "pending" : verified ? "done" : "running",
-    remediate: remediated ? "done" : "pending",
+    remediate: remediationDone ? "done" : remediated ? "running" : "pending",
   };
 }
 
@@ -156,11 +162,23 @@ function deriveStages(issue: LinearIssuePayload, agents: JobAgent[]): Record<str
 export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSummary {
   const done = parseDoneAgentIds(issue);
   const results = parseAgentResults(issue);
-  const agents: JobAgent[] = parseSpawnedAgents(issue).map((agent) => ({
+  const buildAgents: JobAgent[] = parseSpawnedAgents(issue).map((agent) => ({
     ...agent,
+    role: "build",
     done: done.has(agent.agentId),
     prUrl: results.get(agent.agentId)?.prUrl,
   }));
+
+  const remDone = parseRemediationDoneIds(issue);
+  const remResults = parseRemediationResults(issue);
+  const remediationAgents: JobAgent[] = parseRemediationAgents(issue).map((agent) => ({
+    ...agent,
+    role: "remediation",
+    done: remDone.has(agent.agentId),
+    prUrl: remResults.get(agent.agentId)?.prUrl,
+  }));
+
+  const agents = [...buildAgents, ...remediationAgents];
   const startedAt = commentCreatedAt(issue, markers.fleetStarted);
   const completedAt = commentCreatedAt(issue, markers.fleetComplete);
   const status: JobSummary["status"] = completedAt ? "complete" : "in-progress";
@@ -180,7 +198,8 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
     runningForSeconds,
     agents,
     agentsPending: agents.filter((agent) => !agent.done).length,
-    stages: deriveStages(issue, agents),
+    // Stage state ignores remediation agents for build/review/etc; remediation is its own stage.
+    stages: deriveStages(issue, buildAgents),
   };
 }
 
@@ -208,6 +227,27 @@ export async function getJob(identifier: string): Promise<JobSummary | null> {
   return jobs.find((job) => job.identifier.toLowerCase() === want) ?? null;
 }
 
+/**
+ * Finds the launched fleet that a deploy or production alert most likely belongs
+ * to, so observability/remediation can advance the right ticket on the dashboard.
+ *
+ * Vercel/Datadog payloads do not carry a Linear id, so we pick the most recently
+ * updated fleet that matches the predicate (typically the one mid-pipeline). The
+ * raw issue is returned so callers can post markers to it.
+ */
+export async function findActiveFleet(
+  predicate: (job: JobSummary) => boolean,
+): Promise<LinearIssuePayload | null> {
+  const now = Date.now();
+  const issues = await listFleetIssues(triggerLabel);
+  const matches = issues
+    .filter((issue) => hasComment(issue, markers.fleetStarted))
+    .map((issue) => ({ issue, job: summarizeJob(issue, now) }))
+    .filter(({ job }) => predicate(job))
+    .sort((a, b) => Date.parse(b.job.updatedAt ?? "0") - Date.parse(a.job.updatedAt ?? "0"));
+  return matches[0]?.issue ?? null;
+}
+
 export interface ReconcileSummary {
   issuesScanned: number;
   agentsPending: number;
@@ -225,6 +265,43 @@ function agentDoneComment(agent: SpawnedAgent, status: AgentRunStatus): string {
 Agent ID: \`${agent.agentId}\`
 Repo: \`${agent.repo}\`
 ${prLine}`;
+}
+
+function remediationDoneComment(agent: SpawnedAgent, status: AgentRunStatus): string {
+  const prLine = status.prUrl ? `PR: ${status.prUrl}` : "PR: (no PR opened)";
+  return `${markers.remediationDone(agent.agentId)}
+**🛠️ Hotfix PR opened by remediation agent**
+
+Agent ID: \`${agent.agentId}\`
+Repo: \`${agent.repo}\`
+${prLine}`;
+}
+
+/**
+ * Reconciles a single issue's remediation agents (the post-alert track), posting
+ * their hotfix PR back to Linear and Slack. Kept separate from the build-agent
+ * loop so remediation never affects build/review stage derivation.
+ */
+async function reconcileRemediation(issue: LinearIssuePayload): Promise<number> {
+  const done = parseRemediationDoneIds(issue);
+  const pending = parseRemediationAgents(issue).filter((agent) => !done.has(agent.agentId));
+  let completed = 0;
+  for (const agent of pending) {
+    const status = await checkAgentRun(agent.agentId);
+    if (!status || !status.terminal) continue;
+    await postComment(issue.id, remediationDoneComment(agent, status));
+    completed += 1;
+    const prNote = status.prUrl ? `PR: ${status.prUrl}` : "no PR opened";
+    console.log(`[reconcile] remediation agent ${agent.agentId} ${status.status} → ${prNote} (${issue.identifier})`);
+    await postSlack(
+      statusBlocks("🛠️ Hotfix PR opened by remediation agent", [
+        `Ticket: ${issue.identifier} — ${issue.title}`,
+        `Repo: ${agent.repo}`,
+        status.prUrl ? `PR: ${status.prUrl}` : "No PR opened (check the agent run)",
+      ]),
+    );
+  }
+  return completed;
 }
 
 export async function reconcileAll(): Promise<ReconcileSummary> {
@@ -266,6 +343,9 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
         `[reconcile] ${issue.identifier} fleet complete — all ${spawned.length} agents finished and reported back to Linear`,
       );
     }
+
+    // Separate track: report any finished remediation agents (hotfix PRs).
+    summary.agentsCompleted += await reconcileRemediation(issue);
   }
   return summary;
 }

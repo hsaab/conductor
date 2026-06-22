@@ -70,6 +70,9 @@ Spawning is fast; completion is handled out of band by the reconciler so no requ
 | `CRON_SECRET` | Authorize the Vercel Cron call to `/api/reconcile` |
 | `VERCEL_WEBHOOK_SECRET` | Verify `/webhook/vercel` calls |
 | `DATADOG_WEBHOOK_SECRET` | Verify `/webhook/datadog` calls |
+| `DD_API_KEY` | Datadog API key for conductor's deploy-health query (optional) |
+| `DD_APP_KEY` | Datadog application key for the health query (optional) |
+| `DD_SITE` | Datadog site, e.g. `datadoghq.com` (default) |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook for agent output (output only) |
 | `GH_OWNER` | GitHub org/user (default: `hsaab`) |
 | `DEPLOY_TARGET_REPO` | Repo the loop builds/observes (default: `compound`) |

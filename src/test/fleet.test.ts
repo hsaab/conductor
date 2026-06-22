@@ -58,8 +58,8 @@ test("summarizeJob derives deploy/observe stages from markers", () => {
   assert.equal(job.agents[0].prUrl, "https://github.com/hsaab/compound/pull/7");
 });
 
-test("summarizeJob marks observe done and remediate done from markers", () => {
-  const job = summarizeJob(
+test("summarizeJob shows remediate running on alert, then done once the hotfix PR lands", () => {
+  const dispatched = summarizeJob(
     issue([
       { body: markers.fleetStarted },
       { body: compoundSpawn },
@@ -67,12 +67,32 @@ test("summarizeJob marks observe done and remediate done from markers", () => {
       { body: markers.fleetComplete },
       { body: markers.deployed },
       { body: markers.verified },
-      { body: markers.remediated },
+      { body: `${markers.remediationSpawned("bc-fix-222")}\n${markers.remediated}\nAgent ID: \`bc-fix-222\`\nRepo: \`hsaab/compound\`` },
     ]),
     NOW,
   );
-  assert.equal(job.stages.observe, "done");
-  assert.equal(job.stages.remediate, "done");
+  assert.equal(dispatched.stages.observe, "done");
+  assert.equal(dispatched.stages.remediate, "running");
+  // The remediation agent appears as a separate role, not a build agent.
+  assert.equal(dispatched.agents.filter((a) => a.role === "remediation").length, 1);
+  assert.equal(dispatched.stages.build, "done");
+
+  const fixed = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}` },
+      { body: markers.fleetComplete },
+      { body: markers.deployed },
+      { body: markers.verified },
+      { body: `${markers.remediationSpawned("bc-fix-222")}\n${markers.remediated}\nAgent ID: \`bc-fix-222\`\nRepo: \`hsaab/compound\`` },
+      { body: `${markers.remediationDone("bc-fix-222")}\nPR: https://github.com/hsaab/compound/pull/9` },
+    ]),
+    NOW,
+  );
+  assert.equal(fixed.stages.remediate, "done");
+  const remAgent = fixed.agents.find((a) => a.role === "remediation");
+  assert.equal(remAgent?.prUrl, "https://github.com/hsaab/compound/pull/9");
 });
 
 test("summarizeJob marks a fleet complete and drops the running clock", () => {

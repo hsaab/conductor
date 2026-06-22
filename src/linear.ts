@@ -168,6 +168,51 @@ export function hasFailedAgent(issue: LinearIssuePayload): boolean {
   );
 }
 
+const REMEDIATION_SPAWN_RE = /conductor:remediation-agent id=(bc-[0-9a-zA-Z_-]+)/;
+const REMEDIATION_DONE_RE = /conductor:remediation-done id=(bc-[0-9a-zA-Z_-]+)/g;
+const REMEDIATION_DONE_ID_RE = /conductor:remediation-done id=(bc-[0-9a-zA-Z_-]+)/;
+
+/** Remediation agents dispatched for an issue (tracked separately from build agents). */
+export function parseRemediationAgents(issue: LinearIssuePayload): SpawnedAgent[] {
+  const seen = new Set<string>();
+  const agents: SpawnedAgent[] = [];
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    const agentId = body.match(REMEDIATION_SPAWN_RE)?.[1];
+    const repo = body.match(REPO_RE)?.[1];
+    if (!agentId || !repo || seen.has(agentId)) continue;
+    seen.add(agentId);
+    agents.push({ agentId, repo });
+  }
+  return agents;
+}
+
+/** Remediation agent ids that already reported a hotfix PR. */
+export function parseRemediationDoneIds(issue: LinearIssuePayload): Set<string> {
+  const ids = new Set<string>();
+  for (const comment of issue.comments ?? []) {
+    for (const match of (comment.body ?? "").matchAll(REMEDIATION_DONE_RE)) ids.add(match[1]);
+  }
+  return ids;
+}
+
+/** Maps each completed remediation agent id to its hotfix PR URL. */
+export function parseRemediationResults(issue: LinearIssuePayload): Map<string, { prUrl?: string }> {
+  const results = new Map<string, { prUrl?: string }>();
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    const id = body.match(REMEDIATION_DONE_ID_RE)?.[1];
+    if (!id) continue;
+    results.set(id, { prUrl: body.match(PR_URL_RE)?.[1] });
+  }
+  return results;
+}
+
+/** True when any remediation agent has reported a hotfix PR. */
+export function hasRemediationDone(issue: LinearIssuePayload): boolean {
+  return issue.comments?.some((c) => /conductor:remediation-done/.test(c.body ?? "")) ?? false;
+}
+
 /**
  * True for any comment the bridge authored. Newer comments carry a hidden
  * `cursor-demo-bridge` marker, but we also match by content signature so reset

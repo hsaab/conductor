@@ -3,7 +3,7 @@
  * recovering a previously-spawned agent's latest run for the reconciler.
  */
 
-import { cursorKey, markers, modelId } from "./config.js";
+import { cursorKey, deployTargetRepo, ghOwner, markers, modelId } from "./config.js";
 import { postComment } from "./linear.js";
 import type { PlannedTask } from "./planner.js";
 import type { LinearIssuePayload } from "./types.js";
@@ -81,6 +81,73 @@ export async function spawnAgent(task: PlannedTask, issue: LinearIssuePayload): 
     const msg = err instanceof CursorAgentError ? `startup failed: ${err.message}` : String(err);
     console.error(`[${name}] Failed to start on ${task.repo}: ${msg}`);
     await postComment(issue.id, `${markers.bridge}\n**Cursor agent failed to start**\n\nRepo: \`${task.repo}\`\n\n${msg}`);
+  }
+}
+
+export interface RemediationAlert {
+  title: string;
+  body?: string;
+  route?: string;
+  observedMs?: number;
+  /** Optional Linear issue this remediation should be attached to (for the dashboard). */
+  issue?: LinearIssuePayload;
+}
+
+function remediationPrompt(alert: RemediationAlert): string {
+  const repo = `${ghOwner}/${deployTargetRepo}`;
+  return `A production monitor for \`service:${deployTargetRepo}\` just alerted.
+
+## Alert
+- Monitor: ${alert.title}
+- ${alert.route ? `Slow route: ${alert.route}` : "Route: (see alert body)"}
+- ${alert.observedMs ? `Observed response time: ${alert.observedMs}ms` : "Observed: latency above threshold"}
+${alert.body ? `\nDetails:\n${alert.body}` : ""}
+
+## Your job (repo: ${repo})
+1. Diagnose the slow path. Use the Datadog MCP if available to inspect the latency breakdown and slowest spans for \`service:${deployTargetRepo}\`.
+2. The most recent change introduced a performance regression that passes code review but is slow under production data volume — typically an N+1 query (fetching quotes per holding in a loop instead of batching) or a dropped cache (e.g. the memoization in \`src/lib/market-data/cached.ts\` was removed).
+3. Open a HOTFIX PR that reverses exactly that regression: restore batching/caching so latency returns to normal. Keep the change minimal and add a regression test if practical.
+4. Open the PR against \`main\`. Title it clearly as a hotfix and reference the latency alert.
+
+This PR re-enters conductor's loop at review, closing the remediation circle. Open the PR when done.`;
+}
+
+/**
+ * Spawn a remediation cloud agent on the target repo, seeded with a Datadog
+ * alert. Posts a remediation-specific marker (never counted as a build agent) so
+ * the reconciler can report its hotfix PR later. Returns the agent id, or null
+ * on failure.
+ */
+export async function spawnRemediationAgent(alert: RemediationAlert): Promise<string | null> {
+  const { Agent, CursorAgentError } = await import("@cursor/sdk");
+  const repo = `${ghOwner}/${deployTargetRepo}`;
+  console.log(`[remediation] Starting a Cursor cloud agent on github.com/${repo} for "${alert.title}"`);
+  try {
+    await using agent = await Agent.create({
+      apiKey: cursorKey(),
+      model: { id: modelId },
+      cloud: {
+        repos: [{ url: `https://github.com/${repo}` }],
+        autoCreatePR: true,
+        skipReviewerRequest: true,
+      },
+    });
+    const run = await agent.send(remediationPrompt(alert));
+    console.log(`[remediation] Launched on ${repo} — agent ${agent.agentId}, run ${run.id}.`);
+    if (alert.issue) {
+      await postComment(
+        alert.issue.id,
+        `${markers.remediationSpawned(agent.agentId)}\n${markers.remediated}\n**🛠️ Remediation agent dispatched** — diagnosing the latency alert and preparing a hotfix PR.\n\nAgent ID: \`${agent.agentId}\`\nRepo: \`${repo}\``,
+      );
+    }
+    return agent.agentId;
+  } catch (err) {
+    const msg = err instanceof CursorAgentError ? `startup failed: ${err.message}` : String(err);
+    console.error(`[remediation] Failed to start on ${repo}: ${msg}`);
+    if (alert.issue) {
+      await postComment(alert.issue.id, `${markers.bridge}\n**Remediation agent failed to start**\n\n${msg}`);
+    }
+    return null;
   }
 }
 
