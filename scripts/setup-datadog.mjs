@@ -10,10 +10,17 @@
  *     slow, the assertion fails every run, and the test's monitor notifies the
  *     conductor webhook deterministically (no percentile lottery).
  *
+ * Authentication (either works):
+ *   - Personal/Service Access Token: set DD_API_KEY or DD_BEARER_TOKEN to a
+ *     ddpat_/ddsat_ token. It authenticates via `Authorization: Bearer` and
+ *     needs no API key pairing. Make sure DD_SITE matches the token's org site.
+ *   - Classic keys: set DD_API_KEY (api key) + DD_APP_KEY (application key).
+ *
  * Usage (all via env):
- *   DD_API_KEY=...            Datadog API key
- *   DD_APP_KEY=...            Datadog application key
- *   DD_SITE=datadoghq.com     Datadog site (default datadoghq.com)
+ *   DD_API_KEY=...            Datadog API key OR a ddpat_/ddsat_ token
+ *   DD_APP_KEY=...            Datadog application key (omit when using a token)
+ *   DD_BEARER_TOKEN=...       Optional explicit ddpat_/ddsat_ token
+ *   DD_SITE=us5.datadoghq.com Datadog site the credential belongs to
  *   COMPOUND_URL=...          Deployed compound base URL (e.g. https://compound.vercel.app)
  *   CONDUCTOR_URL=...         Deployed conductor base URL (e.g. https://conductor.vercel.app)
  *   DATADOG_WEBHOOK_SECRET=...Shared secret guarding /webhook/datadog
@@ -25,6 +32,7 @@
 const {
   DD_API_KEY,
   DD_APP_KEY,
+  DD_BEARER_TOKEN,
   DD_SITE = "datadoghq.com",
   COMPOUND_URL,
   CONDUCTOR_URL,
@@ -40,18 +48,29 @@ function requireEnv(name, value) {
   return value;
 }
 
-requireEnv("DD_API_KEY", DD_API_KEY);
-requireEnv("DD_APP_KEY", DD_APP_KEY);
+// Prefer an access token (ddpat_/ddsat_) over classic keys. A token may be
+// supplied explicitly via DD_BEARER_TOKEN or just dropped into DD_API_KEY/DD_APP_KEY.
+const bearerToken =
+  DD_BEARER_TOKEN ||
+  [DD_API_KEY, DD_APP_KEY].find((k) => /^dd(pat|sat)_/.test(k ?? ""));
+
+if (!bearerToken) {
+  requireEnv("DD_API_KEY", DD_API_KEY);
+  requireEnv("DD_APP_KEY", DD_APP_KEY);
+}
 requireEnv("COMPOUND_URL", COMPOUND_URL);
 requireEnv("CONDUCTOR_URL", CONDUCTOR_URL);
 requireEnv("DATADOG_WEBHOOK_SECRET", DATADOG_WEBHOOK_SECRET);
 
 const base = `https://api.${DD_SITE}`;
-const headers = {
-  "Content-Type": "application/json",
-  "DD-API-KEY": DD_API_KEY,
-  "DD-APPLICATION-KEY": DD_APP_KEY,
-};
+const headers = bearerToken
+  ? { "Content-Type": "application/json", Authorization: `Bearer ${bearerToken}` }
+  : {
+      "Content-Type": "application/json",
+      "DD-API-KEY": DD_API_KEY,
+      "DD-APPLICATION-KEY": DD_APP_KEY,
+    };
+console.log(`Auth: ${bearerToken ? "access token (Bearer)" : "api+app key"} · Site: ${DD_SITE}\n`);
 
 const WEBHOOK_NAME = "conductor-datadog";
 const targetUrl = `${COMPOUND_URL.replace(/\/$/, "")}/api/market/quotes-check`;
@@ -110,8 +129,19 @@ async function ensureWebhook() {
 /** Create the Synthetic API test with a response-time assertion. */
 async function ensureSyntheticTest() {
   const threshold = Number(RESPONSE_TIME_MS);
+  const testName = "compound — quotes-check latency";
+
+  // Idempotency: skip if a test with this name already exists.
+  const existing = await ddFetch("GET", "/api/v1/synthetics/tests");
+  if (existing.ok && Array.isArray(existing.json.tests)) {
+    const match = existing.json.tests.find((t) => t.name === testName);
+    if (match) {
+      console.log(`· Synthetic test "${testName}" already exists (public_id ${match.public_id}); skipping.`);
+      return;
+    }
+  }
   const test = {
-    name: "compound — quotes-check latency",
+    name: testName,
     type: "api",
     subtype: "http",
     status: "live",

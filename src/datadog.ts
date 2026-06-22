@@ -18,13 +18,27 @@ export interface ServiceHealth {
 }
 
 /**
+ * Datadog auth headers, preferring a Personal/Service Access Token (ddpat_/ddsat_)
+ * which authenticates via `Authorization: Bearer` and needs no API key pairing.
+ * Falls back to classic DD-API-KEY + DD-APPLICATION-KEY. Returns null when no
+ * usable credential is configured.
+ */
+function datadogAuthHeaders(): Record<string, string> | null {
+  const apiKey = datadogApiKey();
+  const appKey = datadogAppKey();
+  const token = [apiKey, appKey].find((k) => /^dd(pat|sat)_/.test(k));
+  if (token) return { Authorization: `Bearer ${token}` };
+  if (apiKey && appKey) return { "DD-API-KEY": apiKey, "DD-APPLICATION-KEY": appKey };
+  return null;
+}
+
+/**
  * Count recent error logs for a service via the Datadog Logs Events Search API.
  * Best-effort: any failure resolves to `{ errors: null, unknown: true }`.
  */
 export async function checkServiceHealth(service: string, minutes = 10): Promise<ServiceHealth> {
-  const apiKey = datadogApiKey();
-  const appKey = datadogAppKey();
-  if (!apiKey || !appKey) return { errors: null, unknown: true };
+  const auth = datadogAuthHeaders();
+  if (!auth) return { errors: null, unknown: true };
 
   const from = `now-${minutes}m`;
   try {
@@ -32,8 +46,7 @@ export async function checkServiceHealth(service: string, minutes = 10): Promise
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "DD-API-KEY": apiKey,
-        "DD-APPLICATION-KEY": appKey,
+        ...auth,
       },
       body: JSON.stringify({
         filter: { query: `service:${service} status:error`, from, to: "now" },
