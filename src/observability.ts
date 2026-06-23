@@ -9,7 +9,7 @@
  * keep it deterministic. The remediation stage, which writes code, is a real
  * cloud agent (see remediation.ts).
  */
-import { deployTargetRepo, markers } from "./config.js";
+import { deployTargetRepo, markers, observeWindowMs } from "./config.js";
 import { checkServiceHealth, datadogServiceUrl } from "./datadog.js";
 import { findActiveFleet } from "./fleet.js";
 import { hasComment, postComment } from "./linear.js";
@@ -101,9 +101,10 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
   await postSlack(statusBlocks(headline, lines));
 
   if (issue && !hasComment(issue, markers.verified)) {
+    const windowMin = Math.round(observeWindowMs() / 60_000);
     await postComment(
       issue.id,
-      `${markers.verified}\n${markers.announced}\n**🔭 Observability:** ${healthLine}. Announced to Slack.`,
+      `${markers.verified}\n${markers.announced}\n**🔭 Observability:** ${healthLine}. Monitoring production for ${windowMin} min before closing the observe window.`,
     );
   }
 

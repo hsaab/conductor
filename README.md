@@ -120,6 +120,7 @@ request blocks on a multi-minute agent run.
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook for deploy/remediation output |
 | `GH_OWNER` | GitHub org/user (default: `hsaab`) |
 | `DEPLOY_TARGET_REPO` | Repo the loop builds/observes (default: `compound`) |
+| `OBSERVE_WINDOW_MS` | Post-deploy monitoring window before observe closes cleanly (default: `120000`, 2 min) |
 | `BRIDGE_MODEL_ID` | Cloud model for spawned agents (default: `composer-2.5`) |
 | `PLANNER_MODEL_ID` | Model the planner agent uses (default: `composer-2.5`) |
 | `MAX_AGENTS` | Upper bound on agents per ticket (default: `6`) |

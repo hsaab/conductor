@@ -2,7 +2,7 @@
  * Fleet orchestration: planning tasks from the ticket, launching agents (without
  * blocking on completion), and reconciling finished runs back into Linear.
  */
-import { markers, triggerLabel, triggerState } from "./config.js";
+import { markers, observeWindowMs, triggerLabel, triggerState } from "./config.js";
 import { checkAgentRun, isRunReportable, spawnAgent, type AgentRunStatus } from "./agents.js";
 import { parseEvents } from "./events.js";
 import {
@@ -155,7 +155,7 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
   // opened the PR that is the build's deliverable (see hasStartupFailure).
   const startupFailed = hasStartupFailure(issue);
   const deployed = hasComment(issue, markers.deployed);
-  const verified = hasComment(issue, markers.verified);
+  const observeComplete = hasComment(issue, markers.observeComplete);
   const remediated = hasComment(issue, markers.remediated);
   const remediationDone = hasRemediationDone(issue);
 
@@ -165,9 +165,21 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
     review: !allDone ? "pending" : deployed ? "done" : "running",
     merge: deployed ? "done" : allDone ? "running" : "pending",
     deploy: deployed ? "done" : "pending",
-    observe: !deployed ? "pending" : verified ? "done" : "running",
+    // Observe runs for a post-deploy window; an alert ends it early via remediated.
+    observe: !deployed ? "pending" : observeComplete || remediated ? "done" : "running",
     remediate: remediationDone ? "done" : remediated ? "running" : "pending",
   };
+}
+
+/**
+ * True when the post-deploy observe window has elapsed. Uses the `verified`
+ * comment timestamp (initial health check) when present, otherwise `deployed`.
+ */
+export function observeWindowElapsed(issue: LinearIssuePayload, nowMs: number, windowMs: number): boolean {
+  const startedAt =
+    commentCreatedAt(issue, markers.verified) ?? commentCreatedAt(issue, markers.deployed);
+  if (!startedAt) return false;
+  return nowMs - Date.parse(startedAt) >= windowMs;
 }
 
 /**
@@ -423,8 +435,37 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
 
     // Separate track: report any finished remediation agents (hotfix PRs).
     summary.agentsCompleted += await reconcileRemediation(issue);
+
+    // Close the observe window when monitoring elapsed with no alerts.
+    await reconcileObserve(issue);
   }
   return summary;
+}
+
+/**
+ * Ends the observe stage when the post-deploy monitoring window passes without
+ * a Datadog alert. Happy-path fleets (e.g. FE-7) finish here; remediation is
+ * never dispatched.
+ */
+async function reconcileObserve(issue: LinearIssuePayload): Promise<void> {
+  if (!hasComment(issue, markers.deployed)) return;
+  if (hasComment(issue, markers.observeComplete)) return;
+  if (hasComment(issue, markers.remediated)) return;
+  if (!observeWindowElapsed(issue, Date.now(), observeWindowMs())) return;
+
+  const windowMin = Math.round(observeWindowMs() / 60_000);
+  await postComment(
+    issue.id,
+    `${markers.observeComplete}\n**✅ Observe window passed** — no production alerts in the last ${windowMin} min.`,
+  );
+  console.log(`[observe] ${issue.identifier} monitoring window elapsed with no alerts`);
+  await postSlack(
+    statusBlocks(`✅ ${issue.identifier} — monitoring passed`, [
+      `${issue.title}`,
+      `No production alerts during the ${windowMin}-minute observe window.`,
+      `Remediation was not needed.`,
+    ]),
+  );
 }
 
 /** Minimum gap between opportunistic reconciles kicked off by dashboard polls. */
