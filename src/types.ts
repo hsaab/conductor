@@ -46,6 +46,21 @@ export interface JobAgent extends SpawnedAgent {
 /** Status of a single pipeline stage, used by the mission-control dashboard. */
 export type StageState = "pending" | "running" | "done" | "failed";
 
+/**
+ * One human-readable entry in a fleet's activity log, derived from a single
+ * conductor-authored Linear comment so the dashboard can show what each step did.
+ */
+export interface JobEvent {
+  /** ISO-8601 timestamp of the source comment, when available. */
+  at?: string;
+  /** Headline summary of what happened (the comment's first readable line). */
+  message: string;
+  /** Optional supporting detail (the comment's remaining readable lines). */
+  detail?: string;
+  /** Pipeline stage this event belongs to, used to color-code the log line. */
+  stage?: string;
+}
+
 /** One launched fleet, derived entirely from an issue's Linear comments. */
 export interface JobSummary {
   identifier: string;
@@ -61,6 +76,8 @@ export interface JobSummary {
   agentsPending: number;
   /** Per-stage status for the mission-control dashboard, keyed by pipeline stage. */
   stages: Record<string, StageState>;
+  /** Chronological activity feed for the dashboard's per-fleet logs panel. */
+  events: JobEvent[];
 }
 
 /** Read-only snapshot returned to the mission-control dashboard. */

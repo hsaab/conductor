@@ -4,11 +4,12 @@
  */
 import { markers, triggerLabel, triggerState } from "./config.js";
 import { checkAgentRun, spawnAgent, type AgentRunStatus } from "./agents.js";
+import { parseEvents } from "./events.js";
 import {
   addIssueReaction,
   deleteBridgeComments,
   hasComment,
-  hasFailedAgent,
+  hasStartupFailure,
   hasRemediationDone,
   isBridgeComment,
   listFleetIssues,
@@ -149,7 +150,10 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
   const started = hasComment(issue, markers.fleetStarted);
   const spawned = buildAgents.length > 0;
   const allDone = spawned && buildAgents.every((agent) => agent.done);
-  const failed = hasFailedAgent(issue);
+  // Build fails only when an agent never launched. A finished run's terminal
+  // status ("cancelled"/"error") is not a failure signal — it can still have
+  // opened the PR that is the build's deliverable (see hasStartupFailure).
+  const startupFailed = hasStartupFailure(issue);
   const deployed = hasComment(issue, markers.deployed);
   const verified = hasComment(issue, markers.verified);
   const remediated = hasComment(issue, markers.remediated);
@@ -157,7 +161,7 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
 
   return {
     plan: !started ? "pending" : spawned ? "done" : "running",
-    build: failed ? "failed" : !spawned ? "pending" : allDone ? "done" : "running",
+    build: startupFailed ? "failed" : !spawned ? "pending" : allDone ? "done" : "running",
     review: !allDone ? "pending" : deployed ? "done" : "running",
     merge: deployed ? "done" : allDone ? "running" : "pending",
     deploy: deployed ? "done" : "pending",
@@ -211,6 +215,8 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
     agentsPending: agents.filter((agent) => !agent.done).length,
     // Stage state ignores remediation agents for build/review/etc; remediation is its own stage.
     stages: deriveStages(issue, buildAgents),
+    // The same comment thread that drives stage state, surfaced as a readable log.
+    events: parseEvents(issue),
   };
 }
 
@@ -320,7 +326,10 @@ export interface ReconcileSummary {
 
 function agentDoneComment(agent: SpawnedAgent, status: AgentRunStatus): string {
   const name = repoShortName(agent.repo);
-  const headline = status.status === "finished" ? "finished" : status.status;
+  // An open PR is the success signal, so report it as such even when the run's
+  // terminal status is "cancelled"/"error". Only surface the raw status when no
+  // PR was produced (a genuinely unsuccessful run).
+  const headline = status.prUrl ? "opened a PR" : status.status === "finished" ? "finished" : status.status;
   const prLine = status.prUrl ? `PR: ${status.prUrl}` : "PR: (no PR opened)";
   return `${markers.agentDone(agent.agentId)}
 **Cursor ${name} agent ${headline}**
@@ -411,4 +420,40 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
     summary.agentsCompleted += await reconcileRemediation(issue);
   }
   return summary;
+}
+
+/** Minimum gap between opportunistic reconciles kicked off by dashboard polls. */
+const RECONCILE_TICK_MS = Number(process.env.RECONCILE_TICK_MS ?? 8000);
+let lastTickStartedAt = 0;
+let tickInFlight: Promise<ReconcileSummary> | null = null;
+
+/**
+ * Opportunistic reconcile that keeps the live dashboard moving on its own.
+ *
+ * Build and remediation completion are only written to Linear by {@link
+ * reconcileAll}, which otherwise runs just on the daily cron or a manual loop —
+ * so a finished cloud run never reaches the board between those. The dashboard
+ * polls every couple of seconds, so we let those polls drive reconciliation:
+ * at most one reconcile runs at a time (in-flight guard) and no more often than
+ * `RECONCILE_TICK_MS` (throttle), which advances the pipeline without hammering
+ * the Cursor API. Returns the reconcile promise to await (new or already
+ * running), or `null` when throttled.
+ */
+export function reconcileTick(): Promise<ReconcileSummary> | null {
+  if (tickInFlight) return tickInFlight;
+  if (Date.now() - lastTickStartedAt < RECONCILE_TICK_MS) return null;
+  lastTickStartedAt = Date.now();
+  tickInFlight = reconcileAll()
+    .then((summary) => {
+      if (summary.agentsCompleted || summary.fleetsCompleted) {
+        console.log(
+          `[reconcile] dashboard tick advanced ${summary.agentsCompleted} agent(s) and completed ${summary.fleetsCompleted} fleet(s)`,
+        );
+      }
+      return summary;
+    })
+    .finally(() => {
+      tickInFlight = null;
+    });
+  return tickInFlight;
 }

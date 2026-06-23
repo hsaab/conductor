@@ -28,7 +28,7 @@ type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
 import { fetchIssue, hasComment, issueRefFromBody, normalizeIssue } from "./linear.js";
-import { listJobs, reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
+import { listJobs, reconcileAll, reconcileTick, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
 import { handleVercelDeployment } from "./observability.js";
 import { handleDatadogAlert } from "./remediation.js";
 import {
@@ -124,7 +124,16 @@ app.get("/api/board", async (req: Req, res: Res) => {
   try {
     const includeComplete = req.query.all === "1" || req.query.all === "true";
     const report = await listJobs({ includeComplete });
-    return res.status(200).set("Cache-Control", "no-store").json({ ok: true, ...report });
+    res.status(200).set("Cache-Control", "no-store").json({ ok: true, ...report });
+
+    // Let the dashboard's own polling advance the pipeline: opportunistically
+    // reconcile finished cloud runs (build/remediation completion) so the board
+    // moves through the stages without a manual reconcile loop. Throttled and
+    // deduped in reconcileTick, and run after the response so the board stays fast.
+    const tick = reconcileTick();
+    if (tick) {
+      waitUntil(tick.catch((err) => console.error("[board] reconcile tick failed:", err)));
+    }
   } catch (err) {
     console.error("[board] failed:", err);
     return res.status(500).json({ error: String(err) });
