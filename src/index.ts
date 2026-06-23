@@ -28,6 +28,7 @@ type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
 import { fetchIssue, hasComment, issueRefFromBody, normalizeIssue } from "./linear.js";
+import { createBoardCache } from "./boardCache.js";
 import { listJobs, reconcileAll, reconcileTick, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
 import { handleVercelDeployment } from "./observability.js";
 import { handleDatadogAlert } from "./remediation.js";
@@ -109,6 +110,10 @@ async function handleWebhook(payload: {
 
 const app = express();
 
+// Short TTL cache so the dashboard's frequent polling collapses into at most one
+// Linear read per window (override the 3s default with BOARD_CACHE_MS).
+const boardCache = createBoardCache((opts) => listJobs(opts), Number(process.env.BOARD_CACHE_MS ?? 3000));
+
 // Mission-control dashboard (public, read-only). Screen-shared during the demo
 // so the wait for cloud agents becomes part of the show.
 app.get("/", (_req: Req, res: Res) => {
@@ -123,16 +128,18 @@ app.get("/api/health", (_req: Req, res: Res) => res.status(200).json({ ok: true 
 app.get("/api/board", async (req: Req, res: Res) => {
   try {
     const includeComplete = req.query.all === "1" || req.query.all === "true";
-    const report = await listJobs({ includeComplete });
+    const report = await boardCache.get(includeComplete);
     res.status(200).set("Cache-Control", "no-store").json({ ok: true, ...report });
 
     // Let the dashboard's own polling advance the pipeline: opportunistically
     // reconcile finished cloud runs (build/remediation completion) so the board
     // moves through the stages without a manual reconcile loop. Throttled and
     // deduped in reconcileTick, and run after the response so the board stays fast.
-    const tick = reconcileTick();
-    if (tick) {
-      waitUntil(tick.catch((err) => console.error("[board] reconcile tick failed:", err)));
+    if (report.needsReconcile) {
+      const tick = reconcileTick();
+      if (tick) {
+        waitUntil(tick.catch((err) => console.error("[board] reconcile tick failed:", err)));
+      }
     }
   } catch (err) {
     console.error("[board] failed:", err);

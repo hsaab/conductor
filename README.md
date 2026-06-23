@@ -125,6 +125,7 @@ request blocks on a multi-minute agent run.
 | `BRIDGE_MODEL_ID` | Cloud model for spawned agents (default: `composer-2.5`) |
 | `PLANNER_MODEL_ID` | Model the planner agent uses (default: `composer-2.5`) |
 | `MAX_AGENTS` | Upper bound on agents per ticket (default: `6`) |
+| `BOARD_CACHE_MS` | TTL for the cached `/api/board` snapshot, so the dashboard's frequent polling collapses into at most one Linear read per window (default: `3000`, 3s) |
 | `BRIDGE_URL` | Deployed conductor base URL (for manual curls) |
 
 Set these on Vercel for production. For local curls keep them in `.env`:

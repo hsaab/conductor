@@ -239,6 +239,24 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
   };
 }
 
+/**
+ * Whether the opportunistic reconciler still has work to advance for this fleet.
+ * Pending agents need their runs checked; a running merge/observe/remediate stage
+ * needs the reconciler to confirm the merge, close the observe window, or report
+ * the hotfix. `deploy` is intentionally excluded: it advances via the Vercel
+ * webhook, not the reconciler, so a fleet waiting only on deploy needs no tick.
+ */
+export function jobNeedsReconcile(job: JobSummary): boolean {
+  if (job.agentsPending > 0) return true;
+  const { build, merge, observe, remediate } = job.stages;
+  return (
+    build === "running" ||
+    merge === "running" ||
+    observe === "running" ||
+    remediate === "running"
+  );
+}
+
 export async function listJobs(
   options: { includeComplete?: boolean } = {},
 ): Promise<JobsReport> {
@@ -253,6 +271,7 @@ export async function listJobs(
     inProgress: inProgress.length,
     complete: jobs.length - inProgress.length,
     agentsPending: inProgress.reduce((sum, job) => sum + job.agentsPending, 0),
+    needsReconcile: jobs.some(jobNeedsReconcile),
     jobs: options.includeComplete ? jobs : inProgress,
   };
 }
