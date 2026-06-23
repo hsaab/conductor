@@ -257,7 +257,9 @@ app.post("/webhook/vercel", express.json({ limit: "1mb" }), (req: Req, res: Res)
 });
 
 // Datadog monitor webhook. On a production alert (latency/errors), conductor
-// spawns the remediation agent to diagnose and open a hotfix PR.
+// spawns the remediation agent to diagnose and open a hotfix PR. Always replies
+// 202 after auth; handleDatadogAlert ignores recovery and malformed/empty
+// payloads (e.g. wrong Content-Type → body={}) without dispatching an agent.
 app.post("/webhook/datadog", express.json({ limit: "1mb" }), (req: Req, res: Res) => {
   if (!isAuthorizedDatadog(req)) return res.status(401).json({ error: "unauthorized" });
   res.status(202).json({ ok: true });

@@ -18,6 +18,26 @@ function isRecovery(alertType: string | undefined): boolean {
   return t === "success" || t === "recovery" || t === "no data" || t === "ok";
 }
 
+/** Datadog `alert_type` values that represent a *firing* alert (vs. recovery/info/empty). */
+const FIRING_ALERT_TYPES = new Set(["error", "warning", "alert"]);
+
+/**
+ * True only when the payload looks like a real, actionable latency alert. Guards
+ * against malformed deliveries — e.g. a POST with the right `?secret=` but no/odd
+ * `Content-Type` leaves `req.body={}`, which `extractAlert` would otherwise turn
+ * into a default-titled "alert" and dispatch a (paid) remediation agent.
+ *
+ * Recognized when EITHER a known firing `alert_type` is present, OR the title/route
+ * matches the latency surface (the quotes-check route). The real Datadog custom
+ * payload satisfies both (it carries `alert_type:"error"` and the hardcoded route).
+ */
+export function isDispatchableAlert(alert: RemediationAlert, alertType: string | undefined): boolean {
+  const type = (alertType ?? "").toLowerCase().trim();
+  if (FIRING_ALERT_TYPES.has(type)) return true;
+  const haystack = `${alert.route ?? ""} ${alert.title ?? ""}`.toLowerCase();
+  return haystack.includes("quotes-check") || haystack.includes("/api/market/") || haystack.includes("latency");
+}
+
 /** Tolerantly extracts the fields conductor needs from a templated Datadog webhook body. */
 export function extractAlert(body: any): { alert: RemediationAlert; alertType?: string } {
   const b = body ?? {};
@@ -40,6 +60,13 @@ export interface RemediationResult {
 export async function handleDatadogAlert(body: unknown): Promise<RemediationResult> {
   const { alert, alertType } = extractAlert(body);
   if (isRecovery(alertType)) return { handled: false, reason: `ignoring ${alertType} notification` };
+
+  // Reject malformed/empty payloads before the (paid) dispatch path. The HTTP
+  // layer in index.ts has already replied 202, so an unrecognized body is simply
+  // ignored rather than treated as a real latency alert.
+  if (!isDispatchableAlert(alert, alertType)) {
+    return { handled: false, reason: "ignoring unrecognized or empty Datadog payload" };
+  }
 
   // Attach to the live fleet that has deployed but not yet been remediated.
   const issue = await findActiveFleet((job) => job.stages.deploy === "done" && job.stages.remediate === "pending");
