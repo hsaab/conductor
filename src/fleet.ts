@@ -3,7 +3,7 @@
  * blocking on completion), and reconciling finished runs back into Linear.
  */
 import { markers, triggerLabel, triggerState } from "./config.js";
-import { checkAgentRun, spawnAgent, type AgentRunStatus } from "./agents.js";
+import { checkAgentRun, isRunReportable, spawnAgent, type AgentRunStatus } from "./agents.js";
 import { parseEvents } from "./events.js";
 import {
   addIssueReaction,
@@ -360,7 +360,9 @@ async function reconcileRemediation(issue: LinearIssuePayload): Promise<number> 
   let completed = 0;
   for (const agent of pending) {
     const status = await checkAgentRun(agent.agentId);
-    if (!status || !status.terminal) continue;
+    // A published hotfix PR is the deliverable, so report it even before the run
+    // goes terminal (mirrors the build-agent loop). See isRunReportable.
+    if (!status || !isRunReportable(status)) continue;
     await postComment(issue.id, remediationDoneComment(agent, status));
     completed += 1;
     const prNote = status.prUrl ? `PR: ${status.prUrl}` : "no PR opened";
@@ -393,7 +395,10 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
 
     for (const agent of pending) {
       const status = await checkAgentRun(agent.agentId);
-      if (!status || !status.terminal) continue;
+      // Report done as soon as a PR is published, not only on terminal runs —
+      // otherwise a run that opens its PR and keeps running leaves the build
+      // stage stuck on "running" on the dashboard. See isRunReportable.
+      if (!status || !isRunReportable(status)) continue;
       await postComment(issue.id, agentDoneComment(agent, status));
       done.add(agent.agentId);
       summary.agentsCompleted += 1;

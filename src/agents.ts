@@ -159,6 +159,20 @@ export interface AgentRunStatus {
 }
 
 /**
+ * Whether a spawned agent's run should be reported complete back to Linear.
+ *
+ * An open PR is the build's (and hotfix's) deliverable, so a published PR counts
+ * as done even while the cloud run is still "running": cloud runs commonly keep
+ * running after opening their PR, and waiting for a terminal status leaves the
+ * dashboard's build stage stuck on "running" despite an already-published PR.
+ * A terminal run with no PR is also reportable (nothing more is coming); a
+ * still-running run with no PR is not yet done.
+ */
+export function isRunReportable(status: AgentRunStatus): boolean {
+  return status.terminal || Boolean(status.prUrl);
+}
+
+/**
  * Inspect a previously-spawned cloud agent's latest run. Returns `null` when
  * the run can't be read yet (transient error), so the caller can retry on the
  * next reconcile tick.
