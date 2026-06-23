@@ -305,6 +305,18 @@ rehearsal PRs so `main` is back to the fast baseline before the real run.
 
 ## 8. Known risks & mitigations
 
+- **Deploy/alert attribution — keep one ticket in flight.** Vercel and Datadog
+  payloads carry no Linear id, so conductor attributes a deploy/alert to a fleet by
+  `findActiveFleet`. It now prefers an **exact match** when the payload carries an
+  identifier that appears in a fleet's comments — the Vercel webhook passes the
+  commit SHA + deploy URL as a hint. But production deploys share one URL, the
+  commit SHA is only recorded once conductor writes the `deployed` marker, and
+  **Datadog alerts carry no hint at all**, so the general fallback is "most recently
+  updated matching fleet." With two concurrent `cursor-fleet` tickets mid-pipeline,
+  a deploy or latency alert can therefore be misattributed. **Constraint: run only
+  one `cursor-fleet` ticket through deploy/observe/remediate at a time.** Let FE-7
+  fully ship (or reach `observe: done`) before moving FE-13 to In Progress; during
+  Act 2, no other fleet should be in the deploy/remediate stages.
 - **Regression must exceed 1500ms.** If FE-13's change only drops the TTL cache but
   keeps batching, a premium AlphaVantage key may still resolve under 1500ms. Mitigate
   by ensuring the regression is an N+1 (per-holding fetch in a loop), or lower the
