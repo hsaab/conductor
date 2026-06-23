@@ -228,24 +228,82 @@ export async function getJob(identifier: string): Promise<JobSummary | null> {
 }
 
 /**
+ * An identifying hint carried by a deploy/alert payload, used to attribute it to
+ * the correct fleet when several are in flight. Vercel deploys can carry a commit
+ * SHA and/or deploy URL; Datadog alerts carry neither (see DEMO_FLOW §"attribution").
+ */
+export interface FleetMatchHint {
+  /** Commit SHA from the deploy payload (full or short form both work). */
+  commitSha?: string;
+  /** Deploy or PR URL from the payload. */
+  url?: string;
+}
+
+/** Lower-cased, non-empty needles derived from a match hint (SHA + short SHA + URL). */
+function hintNeedles(hint: FleetMatchHint): string[] {
+  return [hint.commitSha, hint.commitSha?.slice(0, 7), hint.url]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .map((v) => v.toLowerCase());
+}
+
+/** True when any of the issue's comments contains one of the needles. */
+function commentsContainAny(issue: LinearIssuePayload, needles: string[]): boolean {
+  return issue.comments?.some((comment) => {
+    const body = (comment.body ?? "").toLowerCase();
+    return needles.some((needle) => body.includes(needle));
+  }) ?? false;
+}
+
+/**
+ * Pure fleet-selection core: from already-summarized candidates, pick the fleet a
+ * deploy/alert belongs to.
+ *
+ * Prefers an *exact* attribution when the payload carries an identifier (commit
+ * SHA / deploy or PR URL) that appears in a fleet's recorded comments — this
+ * disambiguates concurrent `cursor-fleet` tickets. Falls back to the most
+ * recently updated matching fleet when no hint matches. Exposed for unit tests.
+ */
+export function selectActiveFleet(
+  candidates: Array<{ issue: LinearIssuePayload; job: JobSummary }>,
+  predicate: (job: JobSummary) => boolean,
+  hint: FleetMatchHint = {},
+): LinearIssuePayload | null {
+  const matches = candidates
+    .filter(({ job }) => predicate(job))
+    .sort((a, b) => Date.parse(b.job.updatedAt ?? "0") - Date.parse(a.job.updatedAt ?? "0"));
+
+  const needles = hintNeedles(hint);
+  if (needles.length > 0) {
+    const exact = matches.find(({ issue }) => commentsContainAny(issue, needles));
+    if (exact) return exact.issue;
+  }
+
+  return matches[0]?.issue ?? null;
+}
+
+/**
  * Finds the launched fleet that a deploy or production alert most likely belongs
  * to, so observability/remediation can advance the right ticket on the dashboard.
  *
- * Vercel/Datadog payloads do not carry a Linear id, so we pick the most recently
- * updated fleet that matches the predicate (typically the one mid-pipeline). The
+ * Vercel/Datadog payloads do not carry a Linear id. When a `hint` (commit
+ * SHA/deploy URL) is supplied and matches a fleet's comments, that exact fleet
+ * wins; otherwise we fall back to the most recently updated matching fleet. The
  * raw issue is returned so callers can post markers to it.
+ *
+ * NOTE: production deploys share one URL and Datadog alerts carry no hint, so the
+ * fallback can still misattribute under multiple concurrent tickets — see the
+ * "one ticket in flight" constraint in DEMO_FLOW.md.
  */
 export async function findActiveFleet(
   predicate: (job: JobSummary) => boolean,
+  hint: FleetMatchHint = {},
 ): Promise<LinearIssuePayload | null> {
   const now = Date.now();
   const issues = await listFleetIssues(triggerLabel);
-  const matches = issues
+  const candidates = issues
     .filter((issue) => hasComment(issue, markers.fleetStarted))
-    .map((issue) => ({ issue, job: summarizeJob(issue, now) }))
-    .filter(({ job }) => predicate(job))
-    .sort((a, b) => Date.parse(b.job.updatedAt ?? "0") - Date.parse(a.job.updatedAt ?? "0"));
-  return matches[0]?.issue ?? null;
+    .map((issue) => ({ issue, job: summarizeJob(issue, now) }));
+  return selectActiveFleet(candidates, predicate, hint);
 }
 
 export interface ReconcileSummary {

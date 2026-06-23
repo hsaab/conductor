@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { summarizeJob } from "../fleet.js";
+import { selectActiveFleet, summarizeJob } from "../fleet.js";
 import { markers } from "../config.js";
-import type { LinearIssuePayload } from "../types.js";
+import type { JobSummary, LinearIssuePayload } from "../types.js";
 
 const NOW = Date.parse("2026-06-02T12:00:00.000Z");
 const compoundSpawn = `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`bc-aaa-111\`\nRepo: \`hsaab/compound\``;
@@ -93,6 +93,85 @@ test("summarizeJob shows remediate running on alert, then done once the hotfix P
   assert.equal(fixed.stages.remediate, "done");
   const remAgent = fixed.agents.find((a) => a.role === "remediation");
   assert.equal(remAgent?.prUrl, "https://github.com/hsaab/compound/pull/9");
+});
+
+// --- selectActiveFleet: deploy/alert attribution across concurrent fleets ---
+
+/** Builds a deployed-but-not-remediated candidate carrying the given comment bodies. */
+function deployedCandidate(
+  identifier: string,
+  updatedAt: string,
+  commentBodies: string[],
+): { issue: LinearIssuePayload; job: JobSummary } {
+  const issue: LinearIssuePayload = {
+    id: identifier.toLowerCase(),
+    identifier,
+    title: `T-${identifier}`,
+    state: { name: "In Progress" },
+    comments: commentBodies.map((body) => ({ body })),
+  };
+  const job = summarizeJob(issue, NOW);
+  // Override updatedAt deterministically so ordering doesn't depend on comment timestamps.
+  return { issue, job: { ...job, updatedAt } };
+}
+
+const deployedToBeRemediated = (job: JobSummary) =>
+  job.stages.deploy === "done" && job.stages.remediate === "pending";
+
+const deployedBase = [
+  markers.fleetStarted,
+  compoundSpawn,
+  `${markers.agentDone("bc-aaa-111")}`,
+  markers.fleetComplete,
+  markers.deployed,
+];
+
+test("selectActiveFleet falls back to the most recently updated fleet when no hint is given", () => {
+  const older = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", deployedBase);
+  const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
+  const chosen = selectActiveFleet([older, newer], deployedToBeRemediated);
+  assert.equal(chosen?.identifier, "FE-20");
+});
+
+test("selectActiveFleet prefers the fleet whose comments match a deploy-URL hint over recency", () => {
+  const target = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", [
+    ...deployedBase,
+    "PR: https://github.com/hsaab/compound/pull/42",
+  ]);
+  const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
+  const chosen = selectActiveFleet([target, newer], deployedToBeRemediated, {
+    url: "https://github.com/hsaab/compound/pull/42",
+  });
+  assert.equal(chosen?.identifier, "FE-13");
+});
+
+test("selectActiveFleet matches a short commit SHA embedded in a deployed marker", () => {
+  const target = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", [
+    ...deployedBase,
+    "**compound deployed to production** (`abc1234`)",
+  ]);
+  const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
+  const chosen = selectActiveFleet([target, newer], deployedToBeRemediated, {
+    commitSha: "abc1234def567890",
+  });
+  assert.equal(chosen?.identifier, "FE-13");
+});
+
+test("selectActiveFleet falls back to recency when the hint matches no fleet", () => {
+  const older = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", deployedBase);
+  const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
+  const chosen = selectActiveFleet([older, newer], deployedToBeRemediated, {
+    commitSha: "deadbeefcafe",
+  });
+  assert.equal(chosen?.identifier, "FE-20");
+});
+
+test("selectActiveFleet returns null when no candidate satisfies the predicate", () => {
+  const notDeployed = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", [
+    markers.fleetStarted,
+    compoundSpawn,
+  ]);
+  assert.equal(selectActiveFleet([notDeployed], deployedToBeRemediated), null);
 });
 
 test("summarizeJob marks a fleet complete and drops the running clock", () => {
