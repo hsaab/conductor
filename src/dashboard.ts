@@ -69,6 +69,25 @@ export const dashboardHtml = /* html */ `<!doctype html>
   .agent .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--pending); }
   .agent .status-dot.done { background: var(--done); }
   .agent .status-dot.running { background: var(--accent); }
+  .logs-wrap { margin-top: 14px; border-top: 1px solid var(--card-03); padding-top: 12px; }
+  .logs-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 8px; }
+  .logs { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 9px; padding-right: 6px; }
+  .logs::-webkit-scrollbar { width: 8px; }
+  .logs::-webkit-scrollbar-thumb { background: var(--card-03); border-radius: 4px; }
+  .log-row { display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+  .log-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); align-self: flex-start; margin-top: 5px; }
+  .log-dot.plan { background: #8b949e; }
+  .log-dot.build { background: var(--accent); }
+  .log-dot.review { background: #d29922; }
+  .log-dot.merge { background: #a371f7; }
+  .log-dot.deploy { background: var(--done); }
+  .log-dot.observe { background: #58a6ff; }
+  .log-dot.remediate { background: var(--failed); }
+  .log-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; padding-top: 1px; }
+  .log-body { min-width: 0; }
+  .log-msg { color: var(--fg); }
+  .log-detail { color: var(--muted); font-size: 12px; margin-top: 2px; word-break: break-word; }
+  .log-empty { color: var(--muted); font-size: 13px; }
   .empty { color: var(--muted); text-align: center; padding: 60px 0; font-size: 14px; }
   footer { color: var(--muted); font-size: 12px; text-align: center; padding: 24px; }
 </style>
@@ -82,7 +101,7 @@ export const dashboardHtml = /* html */ `<!doctype html>
 <main>
   <div id="board"><div class="empty">Loading fleets…</div></div>
 </main>
-<footer>Polls <code>/api/board</code> every 2s · state derived from Linear comment markers</footer>
+<footer>Polls <code>/api/board</code> every 2s · pipeline state and activity log derived from the Linear comment thread</footer>
 <script>
   const STAGES = ["plan", "build", "review", "merge", "deploy", "observe", "remediate"];
 
@@ -108,6 +127,31 @@ export const dashboardHtml = /* html */ `<!doctype html>
       '<span class="aid">' + esc(a.agentId) + '</span>' + pr + '</div>';
   }
 
+  function logTime(at) {
+    if (!at) return "";
+    const d = new Date(at);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  // Per-fleet activity feed so each step's progress is visible, not silent.
+  function renderLog(events) {
+    if (!events || !events.length) {
+      return '<div class="logs-wrap"><div class="logs-head">Activity</div>' +
+        '<div class="log-empty">No activity yet — waiting on the first step…</div></div>';
+    }
+    const rows = events.map((e) => {
+      const detail = e.detail ? '<div class="log-detail">' + esc(e.detail) + '</div>' : "";
+      return '<div class="log-row">' +
+        '<span class="log-dot ' + esc(e.stage || "") + '"></span>' +
+        '<span class="log-time">' + esc(logTime(e.at)) + '</span>' +
+        '<div class="log-body"><div class="log-msg">' + esc(e.message) + '</div>' + detail + '</div>' +
+      '</div>';
+    }).join("");
+    return '<div class="logs-wrap"><div class="logs-head">Activity</div>' +
+      '<div class="logs">' + rows + '</div></div>';
+  }
+
   function renderJob(job) {
     const stages = STAGES.map((s) => renderStage(s, (job.stages && job.stages[s]) || "pending")).join("");
     const agents = (job.agents || []).map(renderAgent).join("") || '<div class="agent">no agents yet</div>';
@@ -124,6 +168,7 @@ export const dashboardHtml = /* html */ `<!doctype html>
       '</div>' +
       '<div class="pipeline">' + stages + '</div>' +
       '<div class="agents">' + agents + '</div>' +
+      renderLog(job.events) +
     '</div>';
   }
 
@@ -134,6 +179,8 @@ export const dashboardHtml = /* html */ `<!doctype html>
       const jobs = data.jobs || [];
       const board = document.getElementById("board");
       board.innerHTML = jobs.length ? jobs.map(renderJob).join("") : '<div class="empty">No fleets launched yet. Drag a cursor-fleet ticket into In Progress.</div>';
+      // Re-render replaces the DOM each tick, so re-pin every feed to its latest entry.
+      document.querySelectorAll(".logs").forEach((el) => { el.scrollTop = el.scrollHeight; });
       document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
     } catch (err) {
       document.getElementById("updated").textContent = "reconnecting…";

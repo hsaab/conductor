@@ -161,11 +161,17 @@ export function parseAgentResults(issue: LinearIssuePayload): Map<string, { prUr
   return results;
 }
 
-/** True when any conductor comment reports an agent that failed to start or errored. */
-export function hasFailedAgent(issue: LinearIssuePayload): boolean {
-  return (
-    issue.comments?.some((c) => /(failed to start|agent .*(error|cancelled))/i.test(c.body ?? "")) ?? false
-  );
+/**
+ * True when a build agent never launched (a genuine startup failure).
+ *
+ * Deliberately scoped to startup failures only. A run's *terminal* status is not
+ * a reliable failure signal: a Cursor cloud run can report `cancelled` (or
+ * `error`) yet still have opened its PR, and the PR is the build's deliverable.
+ * Build success is therefore derived from the build agents' state in fleet.ts,
+ * not from scanning completion comments for status words.
+ */
+export function hasStartupFailure(issue: LinearIssuePayload): boolean {
+  return issue.comments?.some((c) => /failed to start/i.test(c.body ?? "")) ?? false;
 }
 
 const REMEDIATION_SPAWN_RE = /conductor:remediation-agent id=(bc-[0-9a-zA-Z_-]+)/;

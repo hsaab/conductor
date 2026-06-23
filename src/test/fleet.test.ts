@@ -111,3 +111,51 @@ test("summarizeJob marks a fleet complete and drops the running clock", () => {
   assert.equal(job.updatedAt, "2026-06-02T11:05:01.000Z");
   assert.equal(job.agentsPending, 0);
 });
+
+test("summarizeJob treats a cancelled run that opened a PR as a successful build", () => {
+  // A Cursor cloud run can report a terminal status of "cancelled" yet still
+  // have opened its PR. The PR is the build's deliverable, so the build is done
+  // and review begins — it must not read as a failed build.
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      {
+        body: `${markers.agentDone("bc-aaa-111")}\n**Cursor compound agent cancelled**\n\nAgent ID: \`bc-aaa-111\`\nRepo: \`hsaab/compound\`\nPR: https://github.com/hsaab/compound/pull/47`,
+      },
+      { body: markers.fleetComplete },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.build, "done");
+  assert.equal(job.stages.review, "running");
+  assert.equal(job.stages.merge, "running");
+  assert.equal(job.agents[0].prUrl, "https://github.com/hsaab/compound/pull/47");
+});
+
+test("summarizeJob still flags build failed when an agent fails to start", () => {
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: `${markers.bridge}\n**Cursor agent failed to start**\n\nRepo: \`hsaab/compound\`\n\nstartup failed: boom` },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.build, "failed");
+});
+
+test("summarizeJob exposes a chronological activity feed for the dashboard", () => {
+  const job = summarizeJob(
+    issue([
+      { body: `${markers.fleetStarted}\n**🚀 Cursor bridge engaged**`, createdAt: "2026-06-02T11:00:00.000Z" },
+      { body: compoundSpawn, createdAt: "2026-06-02T11:00:01.000Z" },
+      { body: `${markers.agentDone("bc-aaa-111")}\n**Cursor compound agent finished**`, createdAt: "2026-06-02T11:05:00.000Z" },
+    ]),
+    NOW,
+  );
+  assert.equal(job.events.length, 3);
+  assert.equal(job.events[0].message, "🚀 Cursor bridge engaged");
+  assert.equal(job.events[0].stage, "plan");
+  assert.equal(job.events[2].message, "Cursor compound agent finished");
+  assert.equal(job.events[2].stage, "build");
+});
