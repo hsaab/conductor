@@ -12,6 +12,7 @@ import {
   bridgeReactionId,
   hasComment,
   isBridgeComment,
+  issueRefFromBody,
   parseDoneAgentIds,
   parseSpawnedAgents,
 } from "../linear.js";
@@ -81,6 +82,24 @@ test("isBridgeComment recognizes every bridge marker and ignores user comments",
   assert.ok(isBridgeComment("**Cursor fleet accepted**\n\nTrigger: `linear-webhook`"));
   assert.ok(!isBridgeComment("Looks good to me, shipping this."));
   assert.ok(!isBridgeComment(null));
+});
+
+test("issueRefFromBody accepts issueId, identifier, or id and trims whitespace", () => {
+  // /api/trigger and /api/reset must accept the same keys; DEMO_FLOW §7 sends `identifier`.
+  assert.equal(issueRefFromBody({ issueId: "FE-7" }), "FE-7");
+  assert.equal(issueRefFromBody({ identifier: "FE-13" }), "FE-13");
+  assert.equal(issueRefFromBody({ id: "uuid-123" }), "uuid-123");
+  assert.equal(issueRefFromBody({ identifier: "  FE-5  " }), "FE-5");
+  // Precedence: issueId > identifier > id.
+  assert.equal(issueRefFromBody({ issueId: "A", identifier: "B", id: "C" }), "A");
+});
+
+test("issueRefFromBody returns undefined for missing/blank/non-string refs", () => {
+  assert.equal(issueRefFromBody({}), undefined);
+  assert.equal(issueRefFromBody({ identifier: "   " }), undefined);
+  assert.equal(issueRefFromBody({ issueId: 123 }), undefined);
+  assert.equal(issueRefFromBody(undefined), undefined);
+  assert.equal(issueRefFromBody(null), undefined);
 });
 
 test("bridgeReactionId is deterministic, unique per issue, and UUID-shaped", () => {

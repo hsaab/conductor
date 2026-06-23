@@ -1,0 +1,13 @@
+# internalsphere app manifest.
+#
+# Once this repo lives in the `internalsphere` GitHub org, the orchestrator
+# ("ranger") reads and reconciles this file. Kept intentionally minimal:
+#
+# - This bridge is stateless — Linear issue comments are its only state store —
+#   so it declares NO integrations (no Supabase/Upstash/Blob).
+# - The HTTP surface is a single Express function (`src/index.ts`) deployed via
+#   the @vercel/node builder configured in `vercel.json`; no framework preset
+#   and no custom root directory are needed.
+#
+# `version` is the manifest SCHEMA version, not a per-change revision — leave at 1.
+version: 1

@@ -101,19 +101,17 @@ export function hasComment(issue: LinearIssuePayload, marker: string): boolean {
   return issue.comments?.some((comment) => comment.body?.includes(marker)) ?? false;
 }
 
-/** createdAt of the first comment carrying `marker`, if any. */
-export function commentCreatedAt(issue: LinearIssuePayload, marker: string): string | undefined {
-  return issue.comments?.find((comment) => comment.body?.includes(marker))?.createdAt ?? undefined;
-}
-
-/** Most recent createdAt across the bridge's own comments. ISO-8601 UTC strings compare chronologically, so a string max is the latest. */
-export function latestBridgeCommentAt(issue: LinearIssuePayload): string | undefined {
-  let latest: string | undefined;
-  for (const comment of issue.comments ?? []) {
-    if (!comment.createdAt || !isBridgeComment(comment.body)) continue;
-    if (!latest || comment.createdAt > latest) latest = comment.createdAt;
-  }
-  return latest;
+/**
+ * Extracts an issue reference (a Linear UUID or a human identifier like `FE-7`)
+ * from a request body, accepting any of `issueId`, `identifier`, or `id`. Used by
+ * the manual operator endpoints so `/api/trigger` and `/api/reset` accept the
+ * same keys — DEMO_FLOW §7's reset loop sends `identifier`. Returns the trimmed
+ * reference, or `undefined` when none is present.
+ */
+export function issueRefFromBody(body: unknown): string | undefined {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const ref = b.issueId ?? b.identifier ?? b.id;
+  return typeof ref === "string" && ref.trim().length > 0 ? ref.trim() : undefined;
 }
 
 /**

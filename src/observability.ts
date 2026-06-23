@@ -63,8 +63,13 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
     return { handled: false, reason: `ignoring ${dep.target} deploy` };
   }
 
-  // Advance the dashboard: mark the in-flight fleet (build done, not yet deployed) as deployed.
-  const issue = await findActiveFleet((job) => job.stages.build === "done" && job.stages.deploy !== "done");
+  // Advance the dashboard: mark the in-flight fleet (build done, not yet deployed)
+  // as deployed. Pass the deploy's commit SHA / URL as a hint so that, when more
+  // than one fleet is in flight, an exact match wins over "most recently updated".
+  const issue = await findActiveFleet(
+    (job) => job.stages.build === "done" && job.stages.deploy !== "done",
+    { commitSha: dep.commitSha, url: dep.url },
+  );
   const shortSha = dep.commitSha?.slice(0, 7);
   if (issue && !hasComment(issue, markers.deployed)) {
     await postComment(

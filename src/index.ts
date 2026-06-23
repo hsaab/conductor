@@ -5,8 +5,6 @@
  *  - GET  /              mission-control dashboard (public, read-only)
  *  - GET  /api/health     liveness probe
  *  - GET  /api/board      public read-only fleet status for the dashboard
- *  - GET  /api/jobs       secured read-only view of in-progress fleets
- *  - GET  /api/jobs/:id   single launched fleet by Linear identifier
  *  - POST /api/trigger    secured manual fallback for the Linear webhook
  *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
  *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
@@ -14,8 +12,9 @@
  *  - POST /webhook/vercel  Vercel deployment webhook -> observability agent
  *  - POST /webhook/datadog Datadog monitor webhook -> remediation agent
  *
- * Spawning is fast and synchronous-ish; completion is handled out-of-band by the
- * reconciler so no request ever blocks on a multi-minute agent run.
+ * Moving a labeled ticket into "In Progress" fires the webhook, which spawns the
+ * fleet fire-and-forget. Completion is handled out-of-band by the reconciler
+ * (Vercel Cron) so no request ever blocks on a multi-minute agent run.
  */
 import express from "express";
 import { waitUntil } from "@vercel/functions";
@@ -28,8 +27,8 @@ type Req = any;
 type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
-import { fetchIssue, hasComment, normalizeIssue } from "./linear.js";
-import { getJob, listJobs, reconcileAll, reconcileTick, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
+import { fetchIssue, hasComment, issueRefFromBody, normalizeIssue } from "./linear.js";
+import { listJobs, reconcileAll, reconcileTick, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
 import { handleVercelDeployment } from "./observability.js";
 import { handleDatadogAlert } from "./remediation.js";
 import {
@@ -119,8 +118,8 @@ app.get("/", (_req: Req, res: Res) => {
 app.get("/api/health", (_req: Req, res: Res) => res.status(200).json({ ok: true }));
 
 // Public, read-only data source for the dashboard. Same Linear-derived shape as
-// /api/jobs but unauthenticated so the page can poll it without exposing a secret
-// in the browser. Returns only non-sensitive pipeline state (no keys/tokens).
+// the internal fleet summary; unauthenticated so the page can poll it without
+// exposing a secret in the browser. Returns only non-sensitive pipeline state.
 app.get("/api/board", async (req: Req, res: Res) => {
   try {
     const includeComplete = req.query.all === "1" || req.query.all === "true";
@@ -141,47 +140,18 @@ app.get("/api/board", async (req: Req, res: Res) => {
   }
 });
 
-// Read-only snapshot of launched fleets, reconstructed from Linear comments
-// (no Cursor SDK calls, no mutation). In-progress only by default; pass
-// `?all=1` to include completed fleets. Authorized like /api/trigger.
-app.get("/api/jobs", async (req: Req, res: Res) => {
-  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
-  try {
-    const includeComplete = req.query.all === "1" || req.query.all === "true";
-    const report = await listJobs({ includeComplete });
-    return res.status(200).json({ ok: true, ...report });
-  } catch (err) {
-    console.error("[jobs] failed:", err);
-    return res.status(500).json({ error: String(err) });
-  }
-});
-
-// Single launched fleet by Linear identifier (e.g. /api/jobs/ENG-7). Same auth
-// and Linear-derived shape as /api/jobs; 404 when no fleet has launched for it.
-app.get("/api/jobs/:identifier", async (req: Req, res: Res) => {
-  if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
-  try {
-    const job = await getJob(req.params.identifier);
-    if (!job) return res.status(404).json({ error: `no launched fleet for ${req.params.identifier}` });
-    return res.status(200).json({ ok: true, generatedAt: new Date().toISOString(), job });
-  } catch (err) {
-    console.error("[jobs] failed:", err);
-    return res.status(500).json({ error: String(err) });
-  }
-});
-
 app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
 
-  const issueId = req.body?.issueId ?? req.body?.identifier ?? req.body?.id;
-  if (typeof issueId !== "string" || issueId.trim().length === 0) {
+  const issueRef = issueRefFromBody(req.body);
+  if (!issueRef) {
     return res.status(400).json({ error: "issueId, identifier, or id is required" });
   }
 
   const source = typeof req.body?.source === "string" ? req.body.source : "manual-trigger";
   try {
-    const issue = await fetchIssue(issueId.trim());
-    if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueId}` });
+    const issue = await fetchIssue(issueRef);
+    if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueRef}` });
     if (!shouldSpawn(issue)) {
       return res.status(202).json({ ok: true, queued: false, reason: "issue does not match trigger filters" });
     }
@@ -203,13 +173,18 @@ app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
 // back into "In Progress" launches a fresh fleet. Authorized like /api/trigger.
 app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
-  const issueId = req.body?.issueId ?? req.body?.id;
-  if (typeof issueId !== "string" || issueId.trim().length === 0) {
-    return res.status(400).json({ error: "issueId or id is required" });
+  const issueRef = issueRefFromBody(req.body);
+  if (!issueRef) {
+    return res.status(400).json({ error: "issueId, identifier, or id is required" });
   }
   try {
-    const result = await resetIssue(issueId.trim());
-    return res.status(200).json({ ok: true, ...result });
+    // Resolve to the canonical issue first: the bridge's reaction id is derived
+    // from the issue's UUID, so re-arming by a human identifier (e.g. "FE-7",
+    // as DEMO_FLOW §7 does) must operate on issue.id to clear the 🚀 reaction.
+    const issue = await fetchIssue(issueRef);
+    if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueRef}` });
+    const result = await resetIssue(issue.id);
+    return res.status(200).json({ ok: true, identifier: issue.identifier, ...result });
   } catch (err) {
     console.error("[reset] failed:", err);
     return res.status(500).json({ error: String(err) });
@@ -266,7 +241,9 @@ app.post("/webhook/vercel", express.json({ limit: "1mb" }), (req: Req, res: Res)
 });
 
 // Datadog monitor webhook. On a production alert (latency/errors), conductor
-// spawns the remediation agent to diagnose and open a hotfix PR.
+// spawns the remediation agent to diagnose and open a hotfix PR. Always replies
+// 202 after auth; handleDatadogAlert ignores recovery and malformed/empty
+// payloads (e.g. wrong Content-Type → body={}) without dispatching an agent.
 app.post("/webhook/datadog", express.json({ limit: "1mb" }), (req: Req, res: Res) => {
   if (!isAuthorizedDatadog(req)) return res.status(401).json({ error: "unauthorized" });
   res.status(202).json({ ok: true });

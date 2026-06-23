@@ -80,7 +80,7 @@ export interface JobSummary {
   events: JobEvent[];
 }
 
-/** Read-only snapshot returned by the `/api/jobs` endpoint. */
+/** Read-only snapshot returned to the mission-control dashboard. */
 export interface JobsReport {
   generatedAt: string;
   inProgress: number;
