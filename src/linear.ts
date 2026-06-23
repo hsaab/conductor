@@ -102,6 +102,19 @@ export function hasComment(issue: LinearIssuePayload, marker: string): boolean {
 }
 
 /**
+ * Extracts an issue reference (a Linear UUID or a human identifier like `FE-7`)
+ * from a request body, accepting any of `issueId`, `identifier`, or `id`. Used by
+ * the manual operator endpoints so `/api/trigger` and `/api/reset` accept the
+ * same keys — DEMO_FLOW §7's reset loop sends `identifier`. Returns the trimmed
+ * reference, or `undefined` when none is present.
+ */
+export function issueRefFromBody(body: unknown): string | undefined {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const ref = b.issueId ?? b.identifier ?? b.id;
+  return typeof ref === "string" && ref.trim().length > 0 ? ref.trim() : undefined;
+}
+
+/**
  * Recovers the agents spawned for an issue by parsing its "agent spawned"
  * comments. Reading the human-readable comment (rather than a side channel)
  * means even agents spawned by older bridge versions remain reconcilable.
