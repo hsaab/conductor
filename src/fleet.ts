@@ -143,9 +143,9 @@ function latestBridgeCommentAt(issue: LinearIssuePayload): string | undefined {
  * Derives each pipeline stage's status purely from the issue's comment markers,
  * so the dashboard stays consistent with the rest of conductor's state store.
  *
- * The marker thread only directly records plan/build/deploy/observe/remediate;
- * review and merge are inferred from their neighbors (a PR exists once the build
- * is done, and a deploy only happens after a human merges).
+ * The marker thread directly records plan/build/merge/deploy/observe/remediate;
+ * review is inferred from its neighbors (a PR exists once the build is done and
+ * closes once the PR merge is observed).
  */
 function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Record<string, StageState> {
   const started = hasComment(issue, markers.fleetStarted);
