@@ -104,6 +104,27 @@ test("summarizeJob derives deploy/observe stages from markers", () => {
   assert.equal(job.agents[0].prUrl, "https://github.com/hsaab/compound/pull/7");
 });
 
+test("summarizeJob completes review/merge on PR merge, before any deploy", () => {
+  // The `merged` marker (written once the reconciler confirms the PR merged on
+  // GitHub) advances review/merge independently of the Vercel deploy. Deploy then
+  // reads as running until the deployment.succeeded webhook lands.
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}\nPR: https://github.com/hsaab/compound/pull/52` },
+      { body: markers.fleetComplete },
+      { body: `${markers.merged}\n**🔀 Merged**` },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.build, "done");
+  assert.equal(job.stages.review, "done");
+  assert.equal(job.stages.merge, "done");
+  assert.equal(job.stages.deploy, "running");
+  assert.equal(job.stages.observe, "pending");
+});
+
 test("summarizeJob shows remediate running on alert, then done once the hotfix PR lands", () => {
   const dispatched = summarizeJob(
     issue([

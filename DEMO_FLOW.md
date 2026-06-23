@@ -96,8 +96,9 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST "$BRIDGE_URL/webhook/vercel?sec
 - **Vercel deploy webhook** on the **compound** project for `deployment.succeeded`
   → `$BRIDGE_URL/webhook/vercel?secret=$VERCEL_WEBHOOK_SECRET`.
 - **Bugbot** enabled on `hsaab/compound` so PRs are auto-reviewed.
-- **Conductor Vercel env** has `DD_API_KEY` (PAT), `DD_SITE=us5.datadoghq.com`, and all
-  `*_SECRET`s set for Production.
+- **Conductor Vercel env** has `DD_API_KEY` (PAT), `DD_SITE=us5.datadoghq.com`,
+  `GH_TOKEN` (so review/merge advance on the real PR merge, not the deploy), and
+  all `*_SECRET`s set for Production.
 
 ### 1.7 Tickets are armed and in the right starting state
 ```bash
@@ -121,16 +122,16 @@ poll `GET $BRIDGE_URL/api/board` and read `jobs[].stages`.
 |---|---|---|---|
 | plan | a fleet was planned + agents spawned | `fleet-started`, `agent spawned` | `/webhook/linear` → planner |
 | build | every build agent run is terminal | `agent-done id=…` | `/api/reconcile` reads cloud runs |
-| review | the PR exists (build done) → deploy seen | (inferred) | Bugbot on GitHub |
-| merge | a deploy of compound is seen | `deployed` | human merges PR |
+| review | build done → the PR(s) merged | `merged` (or `deployed`) | Bugbot on GitHub |
+| merge | every build PR merged to its default branch | `merged` (a deploy also implies it) | human merges PR; reconcile confirms via GitHub |
 | deploy | Vercel `deployment.succeeded` arrived | `deployed` | `/webhook/vercel` |
 | observe | deploy health verified + announced | `verified`, `announced` | `/webhook/vercel` health check |
 | remediate | hotfix PR opened by remediation agent | `remediated` (running) → `remediation-done` (done) | `/webhook/datadog` + `/api/reconcile` |
 
-**Critical operational note:** `build` and the PR URLs only advance after a
-`/api/reconcile` pass reads the finished cloud runs. `deploy`/`observe` advance
-automatically via the Vercel webhook. Run reconcile on a cadence during the demo
-(section 5.1).
+**Critical operational note:** `build`, the PR URLs, and `merge` only advance
+after a `/api/reconcile` pass — it reads finished cloud runs and checks PR merge
+status on GitHub (needs `GH_TOKEN`). `deploy`/`observe` advance automatically
+via the Vercel webhook. Run reconcile on a cadence during the demo (section 5.1).
 
 ---
 

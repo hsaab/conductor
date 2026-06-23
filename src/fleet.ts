@@ -5,6 +5,7 @@
 import { markers, observeWindowMs, triggerLabel, triggerState } from "./config.js";
 import { checkAgentRun, isRunReportable, spawnAgent, type AgentRunStatus } from "./agents.js";
 import { parseEvents } from "./events.js";
+import { allPullRequestsMerged } from "./github.js";
 import {
   addIssueReaction,
   deleteBridgeComments,
@@ -155,6 +156,10 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
   // opened the PR that is the build's deliverable (see hasStartupFailure).
   const startupFailed = hasStartupFailure(issue);
   const deployed = hasComment(issue, markers.deployed);
+  // Review/merge track the real PR merge (the reconciler writes `merged` after
+  // checking GitHub). A successful deploy implies the merge already happened, so
+  // `deployed` is a fallback signal when no GitHub token is configured.
+  const merged = hasComment(issue, markers.merged) || deployed;
   const observeComplete = hasComment(issue, markers.observeComplete);
   const remediated = hasComment(issue, markers.remediated);
   const remediationDone = hasRemediationDone(issue);
@@ -162,9 +167,11 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
   return {
     plan: !started ? "pending" : spawned ? "done" : "running",
     build: startupFailed ? "failed" : !spawned ? "pending" : allDone ? "done" : "running",
-    review: !allDone ? "pending" : deployed ? "done" : "running",
-    merge: deployed ? "done" : allDone ? "running" : "pending",
-    deploy: deployed ? "done" : "pending",
+    review: !allDone ? "pending" : merged ? "done" : "running",
+    merge: merged ? "done" : allDone ? "running" : "pending",
+    // Deploy waits on the Vercel webhook; it reads as running once merged so the
+    // gap between merge and the deploy.succeeded webhook is visible on the board.
+    deploy: deployed ? "done" : merged ? "running" : "pending",
     // Observe runs for a post-deploy window; an alert ends it early via remediated.
     observe: !deployed ? "pending" : observeComplete || remediated ? "done" : "running",
     remediate: remediationDone ? "done" : remediated ? "running" : "pending",
@@ -433,6 +440,9 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
       );
     }
 
+    // Advance review/merge by confirming the build PR(s) merged on GitHub.
+    await reconcileMerge(issue, spawned, done);
+
     // Separate track: report any finished remediation agents (hotfix PRs).
     summary.agentsCompleted += await reconcileRemediation(issue);
 
@@ -440,6 +450,45 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
     await reconcileObserve(issue);
   }
   return summary;
+}
+
+/**
+ * Advances the merge stage by confirming the build's pull request(s) actually
+ * merged on GitHub, so review/merge complete on the real merge rather than
+ * waiting for the downstream Vercel deploy. No-ops without a `GH_TOKEN` (the
+ * deploy then acts as the merge signal), until the build is done, or until every
+ * build PR is merged. Idempotent via the `merged` marker.
+ */
+async function reconcileMerge(
+  issue: LinearIssuePayload,
+  spawned: SpawnedAgent[],
+  done: Set<string>,
+): Promise<void> {
+  const allDone = spawned.length > 0 && spawned.every((agent) => done.has(agent.agentId));
+  if (!allDone || hasComment(issue, markers.merged)) return;
+
+  const results = parseAgentResults(issue);
+  const prUrls = spawned
+    .map((agent) => results.get(agent.agentId)?.prUrl)
+    .filter((url): url is string => typeof url === "string" && url.length > 0);
+  // No PRs yet means nothing to merge; a later deploy can still advance the stage.
+  if (prUrls.length === 0) return;
+
+  let merged = false;
+  try {
+    merged = await allPullRequestsMerged(prUrls);
+  } catch (err) {
+    console.error(`[merge] PR merge check failed for ${issue.identifier}:`, err);
+    return;
+  }
+  if (!merged) return;
+
+  const count = prUrls.length === 1 ? "1 pull request" : `${prUrls.length} pull requests`;
+  await postComment(
+    issue.id,
+    `${markers.merged}\n**🔀 Merged** — ${count} merged to the default branch.\n${prUrls.join("\n")}`,
+  );
+  console.log(`[merge] ${issue.identifier} PR(s) merged → review/merge complete`);
 }
 
 /**
