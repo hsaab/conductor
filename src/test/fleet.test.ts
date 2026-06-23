@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { selectActiveFleet, summarizeJob } from "../fleet.js";
+import { observeWindowElapsed, selectActiveFleet, summarizeJob } from "../fleet.js";
 import { markers } from "../config.js";
 import type { JobSummary, LinearIssuePayload } from "../types.js";
 
@@ -37,6 +37,52 @@ test("summarizeJob derives pipeline stages: build running while agents pending",
   assert.equal(job.stages.build, "running");
   assert.equal(job.stages.review, "pending");
   assert.equal(job.stages.deploy, "pending");
+});
+
+test("summarizeJob keeps observe running after deploy until the window closes or an alert fires", () => {
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}\nPR: https://github.com/hsaab/compound/pull/7` },
+      { body: markers.fleetComplete },
+      { body: markers.deployed },
+      { body: `${markers.verified}\n**🔭 Observability:** healthy`, createdAt: "2026-06-02T12:00:00.000Z" },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.deploy, "done");
+  assert.equal(job.stages.observe, "running");
+  assert.equal(job.stages.remediate, "pending");
+});
+
+test("summarizeJob closes observe cleanly on the happy path without remediation", () => {
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}` },
+      { body: markers.fleetComplete },
+      { body: markers.deployed },
+      { body: markers.verified },
+      { body: `${markers.observeComplete}\n**✅ Observe window passed**` },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.observe, "done");
+  assert.equal(job.stages.remediate, "pending");
+});
+
+test("observeWindowElapsed uses the verified comment as the window start", () => {
+  const deployedAt = "2026-06-02T12:00:00.000Z";
+  const verifiedAt = "2026-06-02T12:01:00.000Z";
+  const iss = issue([
+    { body: markers.deployed, createdAt: deployedAt },
+    { body: markers.verified, createdAt: verifiedAt },
+  ]);
+  const windowMs = 120_000;
+  assert.equal(observeWindowElapsed(iss, Date.parse("2026-06-02T12:02:59.000Z"), windowMs), false);
+  assert.equal(observeWindowElapsed(iss, Date.parse("2026-06-02T12:03:00.000Z"), windowMs), true);
 });
 
 test("summarizeJob derives deploy/observe stages from markers", () => {
@@ -115,8 +161,8 @@ function deployedCandidate(
   return { issue, job: { ...job, updatedAt } };
 }
 
-const deployedToBeRemediated = (job: JobSummary) =>
-  job.stages.deploy === "done" && job.stages.remediate === "pending";
+const observingToBeRemediated = (job: JobSummary) =>
+  job.stages.observe === "running" && job.stages.remediate === "pending";
 
 const deployedBase = [
   markers.fleetStarted,
@@ -129,7 +175,7 @@ const deployedBase = [
 test("selectActiveFleet falls back to the most recently updated fleet when no hint is given", () => {
   const older = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", deployedBase);
   const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
-  const chosen = selectActiveFleet([older, newer], deployedToBeRemediated);
+  const chosen = selectActiveFleet([older, newer], observingToBeRemediated);
   assert.equal(chosen?.identifier, "FE-20");
 });
 
@@ -139,7 +185,7 @@ test("selectActiveFleet prefers the fleet whose comments match a deploy-URL hint
     "PR: https://github.com/hsaab/compound/pull/42",
   ]);
   const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
-  const chosen = selectActiveFleet([target, newer], deployedToBeRemediated, {
+  const chosen = selectActiveFleet([target, newer], observingToBeRemediated, {
     url: "https://github.com/hsaab/compound/pull/42",
   });
   assert.equal(chosen?.identifier, "FE-13");
@@ -151,7 +197,7 @@ test("selectActiveFleet matches a short commit SHA embedded in a deployed marker
     "**compound deployed to production** (`abc1234`)",
   ]);
   const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
-  const chosen = selectActiveFleet([target, newer], deployedToBeRemediated, {
+  const chosen = selectActiveFleet([target, newer], observingToBeRemediated, {
     commitSha: "abc1234def567890",
   });
   assert.equal(chosen?.identifier, "FE-13");
@@ -160,7 +206,7 @@ test("selectActiveFleet matches a short commit SHA embedded in a deployed marker
 test("selectActiveFleet falls back to recency when the hint matches no fleet", () => {
   const older = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", deployedBase);
   const newer = deployedCandidate("FE-20", "2026-06-02T11:30:00.000Z", deployedBase);
-  const chosen = selectActiveFleet([older, newer], deployedToBeRemediated, {
+  const chosen = selectActiveFleet([older, newer], observingToBeRemediated, {
     commitSha: "deadbeefcafe",
   });
   assert.equal(chosen?.identifier, "FE-20");
@@ -171,7 +217,18 @@ test("selectActiveFleet returns null when no candidate satisfies the predicate",
     markers.fleetStarted,
     compoundSpawn,
   ]);
-  assert.equal(selectActiveFleet([notDeployed], deployedToBeRemediated), null);
+  assert.equal(selectActiveFleet([notDeployed], observingToBeRemediated), null);
+});
+
+test("selectActiveFleet ignores fleets whose observe window already closed", () => {
+  const closed = deployedCandidate("FE-7", "2026-06-02T11:30:00.000Z", [
+    ...deployedBase,
+    markers.verified,
+    markers.observeComplete,
+  ]);
+  const observing = deployedCandidate("FE-13", "2026-06-02T11:00:00.000Z", [...deployedBase, markers.verified]);
+  const chosen = selectActiveFleet([closed, observing], observingToBeRemediated);
+  assert.equal(chosen?.identifier, "FE-13");
 });
 
 test("summarizeJob marks a fleet complete and drops the running clock", () => {

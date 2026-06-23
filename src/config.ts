@@ -38,6 +38,13 @@ export const datadogAppKey = (): string => process.env.DD_APP_KEY ?? "";
 /** Datadog site (e.g. datadoghq.com, us5.datadoghq.com). Defaults to US1. */
 export const datadogSite = (): string => process.env.DD_SITE ?? "datadoghq.com";
 
+/**
+ * How long the observe stage keeps monitoring for production alerts before
+ * closing cleanly (no remediation). Defaults to 2 min to align with Datadog
+ * synthetic cadence. Override with `OBSERVE_WINDOW_MS`.
+ */
+export const observeWindowMs = (): number => Number(process.env.OBSERVE_WINDOW_MS ?? 120_000);
+
 /** Cloud model used for every spawned agent. Override with `BRIDGE_MODEL_ID`. */
 export const modelId = process.env.BRIDGE_MODEL_ID ?? "composer-2.5";
 
@@ -67,8 +74,10 @@ export const markers = {
   agentDone: (agentId: string): string => `<!-- conductor:agent-done id=${agentId} -->`,
   /** Posted when a deploy of the target repo succeeds (observability stage begins). */
   deployed: "<!-- conductor:deployed -->",
-  /** Posted when the observability agent confirms the deploy is healthy. */
+  /** Posted when the initial deploy health check passes; observe keeps monitoring. */
   verified: "<!-- conductor:verified -->",
+  /** Posted when the observe window elapsed with no alerts — remediation not needed. */
+  observeComplete: "<!-- conductor:observe-complete -->",
   /** Posted when a stage result has been announced to Slack. */
   announced: "<!-- conductor:announced -->",
   /** Posted when a Datadog alert has dispatched a remediation agent (stage begins). */

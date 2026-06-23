@@ -23,6 +23,7 @@ function inferStage(body: string): string | undefined {
   if (/conductor:remediation-done|conductor:remediation-agent|conductor:remediated/.test(body)) {
     return "remediate";
   }
+  if (/conductor:observe-complete/.test(body)) return "observe";
   if (/conductor:verified/.test(body)) return "observe";
   if (/conductor:deployed/.test(body)) return "deploy";
   if (/conductor:fleet-complete|conductor:agent-done/.test(body)) return "build";

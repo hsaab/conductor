@@ -175,7 +175,8 @@ idempotent store.
 | `conductor:fleet-started` | **before** spawning | dedupe — a fleet launches at most once per ticket |
 | `conductor:agent-done id=bc-...` | when an agent's PR is reported | keeps reconcile from reporting the same agent twice |
 | `conductor:fleet-complete` | when all agents have reported | posts the one-time "fleet complete" summary |
-| `conductor:deployed` / `conductor:verified` | after Vercel deploy + health check | advances deploy/observe dashboard stages |
+| `conductor:deployed` / `conductor:verified` | after Vercel deploy + initial health check | starts deploy stage; observe keeps monitoring |
+| `conductor:observe-complete` | when the post-deploy window passes with no alerts | closes observe on the happy path (e.g. FE-7) |
 | `conductor:remediation-agent` / `conductor:remediation-done` | around Datadog-triggered hotfix work | tracks remediation separately from build agents |
 
 ---
