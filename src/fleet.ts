@@ -6,12 +6,11 @@ import { markers, triggerLabel, triggerState } from "./config.js";
 import { checkAgentRun, spawnAgent, type AgentRunStatus } from "./agents.js";
 import {
   addIssueReaction,
-  commentCreatedAt,
   deleteBridgeComments,
   hasComment,
   hasFailedAgent,
   hasRemediationDone,
-  latestBridgeCommentAt,
+  isBridgeComment,
   listFleetIssues,
   parseAgentResults,
   parseDoneAgentIds,
@@ -126,6 +125,18 @@ export async function resetIssue(issueId: string): Promise<{ clearedComments: nu
   return { clearedComments };
 }
 
+function commentCreatedAt(issue: LinearIssuePayload, marker: string): string | undefined {
+  return issue.comments?.find((comment) => comment.body?.includes(marker))?.createdAt;
+}
+
+function latestBridgeCommentAt(issue: LinearIssuePayload): string | undefined {
+  return issue.comments
+    ?.filter((comment) => comment.createdAt && isBridgeComment(comment.body))
+    .map((comment) => comment.createdAt as string)
+    .sort()
+    .at(-1);
+}
+
 /**
  * Derives each pipeline stage's status purely from the issue's comment markers,
  * so the dashboard stays consistent with the rest of conductor's state store.
@@ -219,12 +230,6 @@ export async function listJobs(
     agentsPending: inProgress.reduce((sum, job) => sum + job.agentsPending, 0),
     jobs: options.includeComplete ? jobs : inProgress,
   };
-}
-
-export async function getJob(identifier: string): Promise<JobSummary | null> {
-  const want = identifier.trim().toLowerCase();
-  const { jobs } = await listJobs({ includeComplete: true });
-  return jobs.find((job) => job.identifier.toLowerCase() === want) ?? null;
 }
 
 /**

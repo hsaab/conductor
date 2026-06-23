@@ -101,21 +101,6 @@ export function hasComment(issue: LinearIssuePayload, marker: string): boolean {
   return issue.comments?.some((comment) => comment.body?.includes(marker)) ?? false;
 }
 
-/** createdAt of the first comment carrying `marker`, if any. */
-export function commentCreatedAt(issue: LinearIssuePayload, marker: string): string | undefined {
-  return issue.comments?.find((comment) => comment.body?.includes(marker))?.createdAt ?? undefined;
-}
-
-/** Most recent createdAt across the bridge's own comments. ISO-8601 UTC strings compare chronologically, so a string max is the latest. */
-export function latestBridgeCommentAt(issue: LinearIssuePayload): string | undefined {
-  let latest: string | undefined;
-  for (const comment of issue.comments ?? []) {
-    if (!comment.createdAt || !isBridgeComment(comment.body)) continue;
-    if (!latest || comment.createdAt > latest) latest = comment.createdAt;
-  }
-  return latest;
-}
-
 /**
  * Recovers the agents spawned for an issue by parsing its "agent spawned"
  * comments. Reading the human-readable comment (rather than a side channel)

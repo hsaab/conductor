@@ -63,7 +63,7 @@ export interface JobSummary {
   stages: Record<string, StageState>;
 }
 
-/** Read-only snapshot returned by the `/api/jobs` endpoint. */
+/** Read-only snapshot returned to the mission-control dashboard. */
 export interface JobsReport {
   generatedAt: string;
   inProgress: number;
