@@ -47,18 +47,24 @@ test("isDispatchableAlert accepts a latency-route match even when alert_type is 
 });
 
 test("shouldDispatchToFleet does not dispatch when no fleet matches (prevents unbounded spawns)", () => {
-  const decision = shouldDispatchToFleet({ hasFleet: false, alreadyRemediated: false });
+  const decision = shouldDispatchToFleet({ hasFleet: false, alreadyRemediated: false, inFlight: false });
   assert.equal(decision.dispatch, false);
   assert.match(decision.dispatch === false ? decision.reason : "", /no deployed fleet/);
 });
 
 test("shouldDispatchToFleet does not dispatch when the fleet was already remediated", () => {
-  const decision = shouldDispatchToFleet({ hasFleet: true, alreadyRemediated: true });
+  const decision = shouldDispatchToFleet({ hasFleet: true, alreadyRemediated: true, inFlight: false });
   assert.equal(decision.dispatch, false);
   assert.match(decision.dispatch === false ? decision.reason : "", /already dispatched/);
 });
 
+test("shouldDispatchToFleet does not dispatch when remediation is already in flight (concurrency guard)", () => {
+  const decision = shouldDispatchToFleet({ hasFleet: true, alreadyRemediated: false, inFlight: true });
+  assert.equal(decision.dispatch, false);
+  assert.match(decision.dispatch === false ? decision.reason : "", /in flight/);
+});
+
 test("shouldDispatchToFleet dispatches for a clean matched fleet", () => {
-  const decision = shouldDispatchToFleet({ hasFleet: true, alreadyRemediated: false });
+  const decision = shouldDispatchToFleet({ hasFleet: true, alreadyRemediated: false, inFlight: false });
   assert.equal(decision.dispatch, true);
 });
