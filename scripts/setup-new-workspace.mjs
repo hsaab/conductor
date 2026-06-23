@@ -32,8 +32,8 @@ Platform Engineering is rolling out org-wide distributed tracing this quarter. E
 
 This sprint covers two services in the initial wave:
 
-- **compound** — Next.js portfolio app (hero / full stack)
-- **server** — Bitwarden ASP.NET API (chorus / backend subset)
+- **compound** — Next.js portfolio app
+- **server** — Bitwarden ASP.NET API
 
 ## Acceptance criteria
 

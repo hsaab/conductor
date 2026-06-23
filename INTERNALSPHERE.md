@@ -14,14 +14,18 @@ create a repo and open PRs; the `internalsphere-ranger` bot does the rest.
 ## 0. The blocker to settle first: the public webhook route
 
 Every internalsphere app is **SSO-protected to Cursor employees by default**.
-This bridge depends on an **unauthenticated, publicly reachable** endpoint:
+This bridge depends on a few **unauthenticated, publicly reachable** endpoints:
 
 - `POST /webhook/linear` — Linear delivers events here; we authenticate them
   ourselves via HMAC (`LINEAR_WEBHOOK_SECRET`), not via SSO.
+- `POST /webhook/vercel` — Vercel deployment webhooks authenticate with
+  `VERCEL_WEBHOOK_SECRET`.
+- `POST /webhook/datadog` — Datadog monitor webhooks authenticate with
+  `DATADOG_WEBHOOK_SECRET`.
 
-Under default SSO, Linear's deliveries get bounced and nothing triggers. **Ask in
-`#proj-internalsphere` for per-route public access** for `/webhook/linear` (and
-`/api/health`) before relying on the deploy.
+Under default SSO, external webhook deliveries get bounced and nothing triggers. **Ask in
+`#proj-internalsphere` for per-route public access** for `/webhook/linear`,
+`/webhook/vercel`, `/webhook/datadog`, and `/api/health` before relying on the deploy.
 
 - `/api/reconcile` (cron) is fine: Vercel Cron bypasses deployment protection.
 - `/api/trigger` and `/api/reset` are manual backups — leave them SSO-protected.
@@ -62,7 +66,7 @@ Run from the repo. Each prompts for the value (hidden), encrypts it into
 `secrets/<scope>/<KEY>.sops.json`; commit + PR + merge → CI syncs to Vercel.
 
 ```bash
-for KEY in CURSOR_API_KEY LINEAR_API_KEY LINEAR_WEBHOOK_SECRET BRIDGE_TRIGGER_SECRET CRON_SECRET GH_OWNER; do
+for KEY in CURSOR_API_KEY LINEAR_API_KEY LINEAR_WEBHOOK_SECRET BRIDGE_TRIGGER_SECRET CRON_SECRET VERCEL_WEBHOOK_SECRET DATADOG_WEBHOOK_SECRET DD_API_KEY DD_APP_KEY DD_SITE SLACK_WEBHOOK_URL GH_OWNER DEPLOY_TARGET_REPO; do
   python3 scripts/secrets.py add --scope production --key "$KEY"
 done
 # repeat with --scope preview if preview deploys should also function
@@ -77,7 +81,12 @@ Values to use (pull from the current `.env` / personal Vercel project):
 | `LINEAR_WEBHOOK_SECRET` | must equal the secret on the Linear webhook |
 | `BRIDGE_TRIGGER_SECRET` | guards `/api/trigger`, `/api/reset` |
 | `CRON_SECRET` | Vercel Cron auth for `/api/reconcile` |
-| `GH_OWNER` | `hsaab` (target repos `compound`/`server`) |
+| `VERCEL_WEBHOOK_SECRET` | guards `/webhook/vercel` |
+| `DATADOG_WEBHOOK_SECRET` | guards `/webhook/datadog` |
+| `DD_API_KEY` / `DD_APP_KEY` / `DD_SITE` | optional Datadog deploy-health query |
+| `SLACK_WEBHOOK_URL` | Slack output for deploy/remediation stages |
+| `GH_OWNER` | GitHub owner for target repos |
+| `DEPLOY_TARGET_REPO` | repo whose deploys/alerts close the loop |
 
 ## 5. Cron cadence
 
@@ -108,8 +117,9 @@ curl -s https://api.linear.app/graphql \
 - Signed-but-non-fleet webhook → `200`; bad signature → `401`.
 - Move the fe-cursor **FE-5** ticket to **In Progress** → ticket reacts 🚀,
   "bridge engaged" + per-subagent "agent spawned" comments appear, PRs open in
-  `hsaab/compound` and `hsaab/server`, and the reconcile cron posts the PR links
-  back.
+  the planned repos, and the reconcile cron posts the PR links back.
+- Send signed Vercel and Datadog test payloads to verify `/webhook/vercel` and
+  `/webhook/datadog` can bypass SSO and authenticate with their shared secrets.
 
 ## 8. Decommission
 

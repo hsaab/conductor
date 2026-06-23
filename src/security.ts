@@ -1,6 +1,12 @@
 /** Request authentication: Linear webhook signatures and bearer-secret guards. */
 import crypto from "node:crypto";
-import { cronSecret, triggerSecret, webhookSecret } from "./config.js";
+import {
+  cronSecret,
+  datadogWebhookSecret,
+  triggerSecret,
+  vercelWebhookSecret,
+  webhookSecret,
+} from "./config.js";
 
 /**
  * Minimal request shape these guards need. Avoids importing express's types,
@@ -8,6 +14,7 @@ import { cronSecret, triggerSecret, webhookSecret } from "./config.js";
  */
 interface AuthRequest {
   get(name: string): string | undefined;
+  query?: Record<string, unknown>;
 }
 
 /** Verifies a Linear webhook HMAC-SHA256 signature against the raw request body. */
@@ -42,4 +49,33 @@ export function isAuthorizedReconcile(req: AuthRequest): boolean {
   const secret = triggerSecret();
   if (!secret) return false;
   return bearer === secret || req.get("x-bridge-trigger-secret") === secret;
+}
+
+/** Constant-time string comparison that tolerates differing lengths. */
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Shared-secret guard for inbound service webhooks (Vercel, Datadog). The secret
+ * is supplied either as a `?secret=` query param (simplest for webhook URLs) or
+ * an `x-conductor-secret` header. Both providers support custom URLs/headers.
+ */
+function isAuthorizedWebhook(req: AuthRequest, expected: string): boolean {
+  if (!expected) return false;
+  const fromQuery = typeof req.query?.secret === "string" ? (req.query.secret as string) : "";
+  const fromHeader = req.get("x-conductor-secret") ?? "";
+  return (fromQuery !== "" && safeEqual(fromQuery, expected)) || (fromHeader !== "" && safeEqual(fromHeader, expected));
+}
+
+/** Authorizes the Vercel deployment webhook (`/webhook/vercel`). */
+export function isAuthorizedVercel(req: AuthRequest): boolean {
+  return isAuthorizedWebhook(req, vercelWebhookSecret());
+}
+
+/** Authorizes the Datadog monitor webhook (`/webhook/datadog`). */
+export function isAuthorizedDatadog(req: AuthRequest): boolean {
+  return isAuthorizedWebhook(req, datadogWebhookSecret());
 }

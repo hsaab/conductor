@@ -24,7 +24,7 @@ sequenceDiagram
     You->>Linear: Move a cursor-fleet ticket to In Progress
     Linear->>Bridge: Webhook fires → POST /webhook/linear
     Bridge->>Linear: React 🚀 and post the "bridge engaged" comment
-    Bridge->>Cloud: Spawn Hero → compound and Chorus → server (fire-and-forget)
+    Bridge->>Cloud: Spawn N subagents, one per planned repo (fire-and-forget)
     Cloud->>GitHub: Agents work, then open PRs (minutes later)
     Bridge->>Cloud: Vercel Cron reconcile polls each run until it finishes
     Bridge->>Linear: Post each PR link back onto the ticket
@@ -33,7 +33,7 @@ sequenceDiagram
 Read it top to bottom — that is the whole demo:
 
 - **Steps 1–4 · spawn (fast).** Moving the ticket fires a signed Linear webhook.
-  The bridge reacts 🚀, records a marker, and spawns both agents
+  The bridge reacts 🚀, records a marker, and spawns the planned repo agents
   **fire-and-forget**. The HTTP call returns in **seconds** — it never waits on a
   multi-minute run.
 - **Steps 5–7 · finish (out-of-band).** Minutes later the agents open PRs; a
@@ -72,10 +72,10 @@ sequenceDiagram
     Bridge->>Bridge: Verify signature, hydrate the issue from the API
     alt issue is now In Progress
         Bridge->>Linear: 🚀 + "bridge engaged" — writes the fleet-started marker first
-        par Hero and Chorus spawn together
-            Bridge->>Cloud: Agent.create + send — Hero → compound
+        par planned repo A
+            Bridge->>Cloud: Agent.create + send
         and
-            Bridge->>Cloud: Agent.create + send — Chorus → server
+            Bridge->>Cloud: Agent.create + send
         end
         Bridge->>Linear: "agent spawned" comment per agent (records bc- id)
         Cloud->>GitHub: agents work, then auto-open PRs (minutes later)
@@ -85,9 +85,9 @@ sequenceDiagram
     Bridge-->>Linear: 200 OK — returns in seconds
 ```
 
-The `par` block is the detail the overview leaves out: Hero and Chorus spawn
-**together**, and the `fleet-started` marker is written *before* either spawn so a
-repeated delivery is deduped. Returns in **seconds** — the bridge never blocks.
+The `par` block is the detail the overview leaves out: all planned repo agents
+spawn **together**, and the `fleet-started` marker is written *before* any spawn
+so a repeated delivery is deduped. Returns in **seconds** — the bridge never blocks.
 Code: `handleWebhook()` in [`src/index.ts`](src/index.ts), `triggerFleet()` /
 `shouldSpawn()` / `resetIssue()` in [`src/fleet.ts`](src/fleet.ts), `spawnAgent()`
 / `buildPrompt()` in [`src/agents.ts`](src/agents.ts), signature check in
@@ -171,10 +171,12 @@ idempotent store.
 
 | Marker | Posted | Purpose |
 |---|---|---|
-| `cursor-demo-bridge` | on **every** bridge comment | lets reset find and delete all bridge comments |
-| `cursor-demo-bridge:fleet-started` | **before** spawning | dedupe — a fleet launches at most once per ticket |
-| `cursor-demo-bridge:agent-done id=bc-…` | when an agent's PR is reported | keeps reconcile from reporting the same agent twice |
-| `cursor-demo-bridge:fleet-complete` | when all agents have reported | posts the one-time "fleet complete" summary |
+| `conductor` | on generic conductor comments | lets reset find and delete bridge comments |
+| `conductor:fleet-started` | **before** spawning | dedupe — a fleet launches at most once per ticket |
+| `conductor:agent-done id=bc-...` | when an agent's PR is reported | keeps reconcile from reporting the same agent twice |
+| `conductor:fleet-complete` | when all agents have reported | posts the one-time "fleet complete" summary |
+| `conductor:deployed` / `conductor:verified` | after Vercel deploy + health check | advances deploy/observe dashboard stages |
+| `conductor:remediation-agent` / `conductor:remediation-done` | around Datadog-triggered hotfix work | tracks remediation separately from build agents |
 
 ---
 
@@ -188,7 +190,8 @@ Everything the diagrams reference, mapped to the source.
 | Webhook handler (trigger + reset-on-leave) | `handleWebhook()` in [`src/index.ts`](src/index.ts) |
 | Decide to spawn / launch the fleet | `shouldSpawn()`, `triggerFleet()` in [`src/fleet.ts`](src/fleet.ts) |
 | Spawn one cloud agent (fire-and-forget) | `spawnAgent()` in [`src/agents.ts`](src/agents.ts) |
-| Role prompts (Hero → `compound`, Chorus → `server`) | `buildPrompt()` in [`src/agents.ts`](src/agents.ts) |
+| Planner prompt + task selection | [`src/planner.ts`](src/planner.ts) |
+| Fleet-agent task prompt | `buildPrompt()` in [`src/agents.ts`](src/agents.ts) |
 | Reconcile finished runs → PR URLs | `reconcileAll()` in [`src/fleet.ts`](src/fleet.ts), `checkAgentRun()` in [`src/agents.ts`](src/agents.ts) |
 | Re-arm a ticket on leave | `resetIssue()` in [`src/fleet.ts`](src/fleet.ts), `deleteBridgeComments()` in [`src/linear.ts`](src/linear.ts) |
 | Linear access + comment parsers | [`src/linear.ts`](src/linear.ts) |
@@ -206,8 +209,8 @@ What the customer sees, mapped to the flow that drives it:
 2. **The Linear webhook fires**, and within ~1s the ticket reacts with 🚀 and a
    "Cursor bridge engaged" comment appears — the instant signal that the bridge
    caught the move.
-3. **Two "agent spawned" comments appear**, each carrying a `bc-` agent id: Hero
-   in `compound`, Chorus in `server`.
+3. **One "agent spawned" comment appears per planned repo**, each carrying a
+   `bc-` agent id and repository name.
 4. **As each agent finishes, its PR link is posted back** onto the ticket by the
    reconcile cron, then a final "fleet complete" comment. *(Flow 2)*
 5. **Drag the ticket back out to replay** — the webhook re-arms the ticket (the

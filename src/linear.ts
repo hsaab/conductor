@@ -6,9 +6,8 @@
  * parsers turn a fetched issue's comments back into structured agent records.
  */
 import crypto from "node:crypto";
-import { ghOwner, linearKey, reactionEmoji, roleRepo } from "./config.js";
+import { linearKey, reactionEmoji } from "./config.js";
 import type {
-  AgentRole,
   LinearConnection,
   LinearIssuePayload,
   LinearIssueRecord,
@@ -17,7 +16,7 @@ import type {
 
 const AGENT_ID_RE = /Agent ID:\s*`(bc-[0-9a-zA-Z_-]+)`/;
 const REPO_RE = /Repo:\s*`([^`]+)`/;
-const DONE_MARKER_RE = /cursor-demo-bridge:agent-done id=(bc-[0-9a-zA-Z_-]+)/g;
+const DONE_MARKER_RE = /conductor:agent-done id=(bc-[0-9a-zA-Z_-]+)/g;
 
 export async function linearGraphql<T>(
   query: string,
@@ -115,11 +114,10 @@ export function parseSpawnedAgents(issue: LinearIssuePayload): SpawnedAgent[] {
     const body = comment.body ?? "";
     if (!/agent spawned/i.test(body)) continue;
     const agentId = body.match(AGENT_ID_RE)?.[1];
-    if (!agentId || seen.has(agentId)) continue;
-    const role: AgentRole = /Hero/i.test(body) ? "hero" : "chorus";
-    const repo = body.match(REPO_RE)?.[1] ?? `${ghOwner}/${roleRepo[role]}`;
+    const repo = body.match(REPO_RE)?.[1];
+    if (!agentId || !repo || seen.has(agentId)) continue;
     seen.add(agentId);
-    agents.push({ role, agentId, repo });
+    agents.push({ agentId, repo });
   }
   return agents;
 }
@@ -133,6 +131,73 @@ export function parseDoneAgentIds(issue: LinearIssuePayload): Set<string> {
   return ids;
 }
 
+const PR_URL_RE = /PR:\s*(https?:\/\/[^\s)]+)/i;
+const DONE_ID_RE = /conductor:agent-done id=(bc-[0-9a-zA-Z_-]+)/;
+
+/** Maps each completed agent id to the PR URL parsed from its completion comment. */
+export function parseAgentResults(issue: LinearIssuePayload): Map<string, { prUrl?: string }> {
+  const results = new Map<string, { prUrl?: string }>();
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    const id = body.match(DONE_ID_RE)?.[1];
+    if (!id) continue;
+    results.set(id, { prUrl: body.match(PR_URL_RE)?.[1] });
+  }
+  return results;
+}
+
+/** True when any conductor comment reports an agent that failed to start or errored. */
+export function hasFailedAgent(issue: LinearIssuePayload): boolean {
+  return (
+    issue.comments?.some((c) => /(failed to start|agent .*(error|cancelled))/i.test(c.body ?? "")) ?? false
+  );
+}
+
+const REMEDIATION_SPAWN_RE = /conductor:remediation-agent id=(bc-[0-9a-zA-Z_-]+)/;
+const REMEDIATION_DONE_RE = /conductor:remediation-done id=(bc-[0-9a-zA-Z_-]+)/g;
+const REMEDIATION_DONE_ID_RE = /conductor:remediation-done id=(bc-[0-9a-zA-Z_-]+)/;
+
+/** Remediation agents dispatched for an issue (tracked separately from build agents). */
+export function parseRemediationAgents(issue: LinearIssuePayload): SpawnedAgent[] {
+  const seen = new Set<string>();
+  const agents: SpawnedAgent[] = [];
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    const agentId = body.match(REMEDIATION_SPAWN_RE)?.[1];
+    const repo = body.match(REPO_RE)?.[1];
+    if (!agentId || !repo || seen.has(agentId)) continue;
+    seen.add(agentId);
+    agents.push({ agentId, repo });
+  }
+  return agents;
+}
+
+/** Remediation agent ids that already reported a hotfix PR. */
+export function parseRemediationDoneIds(issue: LinearIssuePayload): Set<string> {
+  const ids = new Set<string>();
+  for (const comment of issue.comments ?? []) {
+    for (const match of (comment.body ?? "").matchAll(REMEDIATION_DONE_RE)) ids.add(match[1]);
+  }
+  return ids;
+}
+
+/** Maps each completed remediation agent id to its hotfix PR URL. */
+export function parseRemediationResults(issue: LinearIssuePayload): Map<string, { prUrl?: string }> {
+  const results = new Map<string, { prUrl?: string }>();
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    const id = body.match(REMEDIATION_DONE_ID_RE)?.[1];
+    if (!id) continue;
+    results.set(id, { prUrl: body.match(PR_URL_RE)?.[1] });
+  }
+  return results;
+}
+
+/** True when any remediation agent has reported a hotfix PR. */
+export function hasRemediationDone(issue: LinearIssuePayload): boolean {
+  return issue.comments?.some((c) => /conductor:remediation-done/.test(c.body ?? "")) ?? false;
+}
+
 /**
  * True for any comment the bridge authored. Newer comments carry a hidden
  * `cursor-demo-bridge` marker, but we also match by content signature so reset
@@ -140,9 +205,10 @@ export function parseDoneAgentIds(issue: LinearIssuePayload): Set<string> {
  * spawned" notices) — otherwise the reconciler would keep re-reporting them.
  */
 const BRIDGE_SIGNATURES = [
-  /cursor-demo-bridge/,
-  /Cursor (Hero|Chorus) agent (spawned|finished|failed)/i,
-  /Cursor (fleet|bridge) (accepted|complete|engaged)/i,
+  /conductor/,
+  /cursor-demo-bridge/, // legacy marker, so reset still cleans comments from older deploys
+  /Cursor .*agent (spawned|finished|failed)/i,
+  /Cursor (fleet|bridge|conductor) (accepted|complete|engaged)/i,
 ];
 
 export function isBridgeComment(body: string | null | undefined): boolean {
@@ -156,7 +222,7 @@ export function isBridgeComment(body: string | null | undefined): boolean {
  * without having to look it up.
  */
 export function bridgeReactionId(issueId: string): string {
-  const h = crypto.createHash("sha256").update(`cursor-demo-bridge:reaction:${issueId}`).digest("hex");
+  const h = crypto.createHash("sha256").update(`conductor:reaction:${issueId}`).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 

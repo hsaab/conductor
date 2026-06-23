@@ -2,11 +2,15 @@
  * HTTP surface for the Linear ↔ Cursor bridge.
  *
  * Routes:
- *  - POST /webhook/linear  Linear webhook (signature-verified) — the trigger
- *  - GET  /api/health      liveness probe
+ *  - GET  /              mission-control dashboard (public, read-only)
+ *  - GET  /api/health     liveness probe
+ *  - GET  /api/board      public read-only fleet status for the dashboard
+ *  - POST /api/trigger    secured manual fallback for the Linear webhook
+ *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
  *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
- *  - POST /api/trigger     secured manual fallback for the Linear webhook
- *  - POST /api/reset       secured manual re-arm (clears bridge comments + reaction)
+ *  - POST /webhook/linear  Linear webhook (signature-verified)
+ *  - POST /webhook/vercel  Vercel deployment webhook -> observability agent
+ *  - POST /webhook/datadog Datadog monitor webhook -> remediation agent
  *
  * Moving a labeled ticket into "In Progress" fires the webhook, which spawns the
  * fleet fire-and-forget. Completion is handled out-of-band by the reconciler
@@ -22,9 +26,18 @@ import { waitUntil } from "@vercel/functions";
 type Req = any;
 type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
+import { dashboardHtml } from "./dashboard.js";
 import { fetchIssue, hasComment, normalizeIssue } from "./linear.js";
-import { reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
-import { isAuthorizedReconcile, isAuthorizedTrigger, verifyLinearSignature } from "./security.js";
+import { listJobs, reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
+import { handleVercelDeployment } from "./observability.js";
+import { handleDatadogAlert } from "./remediation.js";
+import {
+  isAuthorizedDatadog,
+  isAuthorizedReconcile,
+  isAuthorizedTrigger,
+  isAuthorizedVercel,
+  verifyLinearSignature,
+} from "./security.js";
 import type { LinearIssuePayload } from "./types.js";
 
 /** Best-effort, per-instance dedupe of webhook redeliveries. */
@@ -35,10 +48,28 @@ async function handleWebhook(payload: {
   type: string;
   data: LinearIssuePayload;
 }): Promise<void> {
-  if (payload.type !== "Issue" || payload.action !== "update") return;
+  const identifier = payload.data?.identifier ?? payload.data?.id ?? "unknown";
+  console.log(`[webhook] Linear delivered a ${payload.type}.${payload.action} event for ${identifier}`);
+
+  if (payload.type !== "Issue" || payload.action !== "update") {
+    console.log(`[webhook] Ignoring ${identifier}: only Issue updates can start a fleet (got ${payload.type}.${payload.action})`);
+    return;
+  }
+
   const webhookIssue = normalizeIssue(payload.data);
+  const incomingState = webhookIssue.state?.name ?? "unknown";
+  console.log(
+    `[webhook] Ticket ${webhookIssue.identifier} "${webhookIssue.title}" was updated (state is now "${incomingState}")`,
+  );
+
   const isFleetLabeled = webhookIssue.labels?.some((l) => l.name === triggerLabel) ?? false;
-  if (!isFleetLabeled) return;
+  if (!isFleetLabeled) {
+    console.log(
+      `[webhook] Ignoring ${webhookIssue.identifier}: ticket is not labeled "${triggerLabel}", so the bridge stays out of it`,
+    );
+    return;
+  }
+  console.log(`[webhook] ${webhookIssue.identifier} is labeled "${triggerLabel}" — this ticket is ours to handle`);
 
   // Hydrate from the API so labels/comments/state reflect current truth.
   let issue = webhookIssue;
@@ -48,22 +79,57 @@ async function handleWebhook(payload: {
     console.error("[webhook] could not hydrate Linear issue:", err);
   }
 
+  const stateName = issue.state?.name ?? "unknown";
   if (shouldSpawn(issue)) {
+    console.log(
+      `[webhook] ${issue.identifier} is in "${triggerState}" — handing off to the fleet launcher`,
+    );
     const result = await triggerFleet(issue, "linear-webhook");
     if (!result.queued && result.reason) {
-      console.log(`[webhook] skipped ${issue.identifier}: ${result.reason}`);
+      console.log(`[webhook] No fleet launched for ${issue.identifier}: ${result.reason}`);
     }
-  } else if (hasComment(issue, markers.fleetStarted)) {
+    return;
+  }
+
+  if (hasComment(issue, markers.fleetStarted)) {
     // Ticket left "In Progress" carrying an active fleet record: re-arm it so a
     // future move back into "In Progress" launches a fresh fleet.
+    console.log(
+      `[webhook] ${issue.identifier} left "${triggerState}" (now "${stateName}") — re-arming it for a fresh run next time`,
+    );
     await resetIssue(issue.id);
-    console.log(`[webhook] re-armed ${issue.identifier} (left ${triggerState})`);
+    console.log(`[webhook] ${issue.identifier} re-armed: cleared the 🚀 reaction and bridge comments`);
+    return;
   }
+
+  console.log(
+    `[webhook] Nothing to do for ${issue.identifier}: it is in "${stateName}", not "${triggerState}"`,
+  );
 }
 
 const app = express();
 
+// Mission-control dashboard (public, read-only). Screen-shared during the demo
+// so the wait for cloud agents becomes part of the show.
+app.get("/", (_req: Req, res: Res) => {
+  res.status(200).set("Content-Type", "text/html; charset=utf-8").send(dashboardHtml);
+});
+
 app.get("/api/health", (_req: Req, res: Res) => res.status(200).json({ ok: true }));
+
+// Public, read-only data source for the dashboard. Same Linear-derived shape as
+// the internal fleet summary; unauthenticated so the page can poll it without
+// exposing a secret in the browser. Returns only non-sensitive pipeline state.
+app.get("/api/board", async (req: Req, res: Res) => {
+  try {
+    const includeComplete = req.query.all === "1" || req.query.all === "true";
+    const report = await listJobs({ includeComplete });
+    return res.status(200).set("Cache-Control", "no-store").json({ ok: true, ...report });
+  } catch (err) {
+    console.error("[board] failed:", err);
+    return res.status(500).json({ error: String(err) });
+  }
+});
 
 app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
@@ -95,8 +161,7 @@ app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
 });
 
 // Re-arms an issue (clears the bridge's comments + reaction) so dragging it
-// back into "In Progress" launches a fresh fleet. Driven by the poller when a
-// ticket leaves "In Progress". Authorized like /api/trigger.
+// back into "In Progress" launches a fresh fleet. Authorized like /api/trigger.
 app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
   const issueId = req.body?.issueId ?? req.body?.id;
@@ -112,8 +177,8 @@ app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
   }
 });
 
-// GET for Vercel Cron (the daily backstop); POST for the local poller's fast
-// driver. Both authenticate via {@link isAuthorizedReconcile}.
+// GET for Vercel Cron (daily backstop); POST for manual demo reconcile.
+// Both authenticate via {@link isAuthorizedReconcile}.
 app.all("/api/reconcile", async (req: Req, res: Res) => {
   if (!isAuthorizedReconcile(req)) return res.status(401).json({ error: "unauthorized" });
   try {
@@ -145,9 +210,37 @@ app.post("/webhook/linear", express.raw({ type: "*/*" }), (req: Req, res: Res) =
   );
 });
 
+// Vercel deployment webhook. On a successful production deploy of the target
+// project, conductor verifies health and announces to Slack (observability stage).
+app.post("/webhook/vercel", express.json({ limit: "1mb" }), (req: Req, res: Res) => {
+  if (!isAuthorizedVercel(req)) return res.status(401).json({ error: "unauthorized" });
+  const type = req.body?.type ?? "(none)";
+  if (type !== "deployment.succeeded") {
+    return res.status(200).json({ ok: true, ignored: `event ${type}` });
+  }
+  res.status(202).json({ ok: true });
+  waitUntil(
+    handleVercelDeployment(req.body)
+      .then((r) => console.log(`[webhook/vercel] ${r.handled ? "handled" : "skipped"}${r.reason ? `: ${r.reason}` : ""}`))
+      .catch((err) => console.error("[webhook/vercel] handler error:", err)),
+  );
+});
+
+// Datadog monitor webhook. On a production alert (latency/errors), conductor
+// spawns the remediation agent to diagnose and open a hotfix PR.
+app.post("/webhook/datadog", express.json({ limit: "1mb" }), (req: Req, res: Res) => {
+  if (!isAuthorizedDatadog(req)) return res.status(401).json({ error: "unauthorized" });
+  res.status(202).json({ ok: true });
+  waitUntil(
+    handleDatadogAlert(req.body)
+      .then((r) => console.log(`[webhook/datadog] ${r.handled ? "handled" : "skipped"}${r.reason ? `: ${r.reason}` : ""}`))
+      .catch((err) => console.error("[webhook/datadog] handler error:", err)),
+  );
+});
+
 export default app;
 
 if (!process.env.VERCEL) {
   const port = Number(process.env.PORT ?? 3001);
-  app.listen(port, () => console.log(`cursor-demo-bridge listening on :${port}`));
+  app.listen(port, () => console.log(`conductor listening on :${port}`));
 }
