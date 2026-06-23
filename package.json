@@ -8,7 +8,8 @@
     "start": "tsx --env-file=.env src/index.ts",
     "build": "tsc --noEmit",
     "test": "node --import tsx --test src/**/*.test.ts",
-    "setup": "node --env-file=.env scripts/setup-new-workspace.mjs"
+    "setup": "node --env-file=.env scripts/setup-new-workspace.mjs",
+    "reset-demo": "node --env-file-if-exists=.env scripts/reset-demo.mjs"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.13",
