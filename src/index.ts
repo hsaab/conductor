@@ -27,7 +27,7 @@ type Req = any;
 type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
-import { fetchIssue, hasComment, normalizeIssue } from "./linear.js";
+import { fetchIssue, hasComment, issueRefFromBody, normalizeIssue } from "./linear.js";
 import { listJobs, reconcileAll, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
 import { handleVercelDeployment } from "./observability.js";
 import { handleDatadogAlert } from "./remediation.js";
@@ -134,15 +134,15 @@ app.get("/api/board", async (req: Req, res: Res) => {
 app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
 
-  const issueId = req.body?.issueId ?? req.body?.identifier ?? req.body?.id;
-  if (typeof issueId !== "string" || issueId.trim().length === 0) {
+  const issueRef = issueRefFromBody(req.body);
+  if (!issueRef) {
     return res.status(400).json({ error: "issueId, identifier, or id is required" });
   }
 
   const source = typeof req.body?.source === "string" ? req.body.source : "manual-trigger";
   try {
-    const issue = await fetchIssue(issueId.trim());
-    if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueId}` });
+    const issue = await fetchIssue(issueRef);
+    if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueRef}` });
     if (!shouldSpawn(issue)) {
       return res.status(202).json({ ok: true, queued: false, reason: "issue does not match trigger filters" });
     }
@@ -164,13 +164,18 @@ app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
 // back into "In Progress" launches a fresh fleet. Authorized like /api/trigger.
 app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
-  const issueId = req.body?.issueId ?? req.body?.id;
-  if (typeof issueId !== "string" || issueId.trim().length === 0) {
-    return res.status(400).json({ error: "issueId or id is required" });
+  const issueRef = issueRefFromBody(req.body);
+  if (!issueRef) {
+    return res.status(400).json({ error: "issueId, identifier, or id is required" });
   }
   try {
-    const result = await resetIssue(issueId.trim());
-    return res.status(200).json({ ok: true, ...result });
+    // Resolve to the canonical issue first: the bridge's reaction id is derived
+    // from the issue's UUID, so re-arming by a human identifier (e.g. "FE-7",
+    // as DEMO_FLOW §7 does) must operate on issue.id to clear the 🚀 reaction.
+    const issue = await fetchIssue(issueRef);
+    if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueRef}` });
+    const result = await resetIssue(issue.id);
+    return res.status(200).json({ ok: true, identifier: issue.identifier, ...result });
   } catch (err) {
     console.error("[reset] failed:", err);
     return res.status(500).json({ error: String(err) });
