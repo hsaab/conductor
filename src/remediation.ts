@@ -56,6 +56,28 @@ export interface RemediationResult {
   agentId?: string;
 }
 
+/** A pure gate decision for a matched (or unmatched) fleet. */
+export type FleetDispatchDecision = { dispatch: true } | { dispatch: false; reason: string };
+
+/**
+ * Decides whether to dispatch a remediation agent given the matched fleet's
+ * state. Returns `dispatch:false` when there is no matching fleet — without a
+ * fleet there is no issue to carry the `remediated` idempotency marker, so
+ * spawning would be unbounded across repeated alerts. Pure, so it is unit-tested.
+ */
+export function shouldDispatchToFleet(input: {
+  hasFleet: boolean;
+  alreadyRemediated: boolean;
+}): FleetDispatchDecision {
+  if (!input.hasFleet) {
+    return { dispatch: false, reason: "no deployed fleet awaiting remediation; not dispatching" };
+  }
+  if (input.alreadyRemediated) {
+    return { dispatch: false, reason: "remediation already dispatched for this fleet" };
+  }
+  return { dispatch: true };
+}
+
 /** Handles one Datadog monitor webhook end to end. Idempotent per fleet via the `remediated` marker. */
 export async function handleDatadogAlert(body: unknown): Promise<RemediationResult> {
   const { alert, alertType } = extractAlert(body);
@@ -70,9 +92,11 @@ export async function handleDatadogAlert(body: unknown): Promise<RemediationResu
 
   // Attach to the live fleet that has deployed but not yet been remediated.
   const issue = await findActiveFleet((job) => job.stages.deploy === "done" && job.stages.remediate === "pending");
-  if (issue && hasComment(issue, markers.remediated)) {
-    return { handled: false, reason: "remediation already dispatched for this fleet" };
-  }
+  const decision = shouldDispatchToFleet({
+    hasFleet: !!issue,
+    alreadyRemediated: !!(issue && hasComment(issue, markers.remediated)),
+  });
+  if (!decision.dispatch || !issue) return { handled: false, reason: decision.dispatch ? "no matching fleet" : decision.reason };
 
   // Beat 1: announce the problem.
   await postSlack(
