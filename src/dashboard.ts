@@ -47,7 +47,17 @@ export const dashboardHtml = /* html */ `<!doctype html>
   header .sub { color: var(--muted); font-size: 13px; }
   header .live { margin-left: auto; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
   header .live .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--done); animation: pulse 2s infinite; }
+  header .live .pulse.paused { animation: none; background: var(--muted); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  /* Header control that pauses/resumes the board poll. A pill to echo the badges. */
+  header .toggle {
+    font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+    color: var(--fg); background: var(--card-02); border: 1px solid var(--card-03);
+    border-radius: 999px; padding: 6px 12px;
+  }
+  header .toggle:hover { background: var(--card-03); border-color: var(--accent); }
+  header .toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  header .toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
   /* Line-operators legend: a single key for every worker type on the line. */
   .legend {
@@ -178,12 +188,13 @@ export const dashboardHtml = /* html */ `<!doctype html>
   <h1>conductor<span class="dot">.</span></h1>
   <span class="sub">closed-loop agent factory — mission control</span>
   <span class="live"><span class="pulse"></span><span id="updated">connecting…</span></span>
+  <button id="pause" type="button" class="toggle" aria-pressed="false" aria-label="Pause polling">Pause</button>
 </header>
 <div class="legend" id="legend"></div>
 <main>
   <div id="board"><div class="empty">Loading fleets…</div></div>
 </main>
-<footer>Polls <code>/api/board</code> every 2s · pipeline state and activity log derived from the Linear comment thread</footer>
+<footer>Polls <code>/api/board</code> every 2s (pause from the header) · pipeline state and activity log derived from the Linear comment thread</footer>
 <script>
   const STAGES = ["plan", "build", "review", "merge", "deploy", "observe", "remediate"];
 
@@ -344,8 +355,45 @@ export const dashboardHtml = /* html */ `<!doctype html>
     }
   }
 
-  // Tick the in-progress timers locally between polls for a live feel.
+  // Polling control. The board poll is conductor's only Linear-backed loop: every
+  // /api/board read hits Linear (through the short TTL cache), so this 2s loop is
+  // the "polling of Linear" a presenter may want to freeze mid-demo. boardTimer is
+  // the single source of truth. null means paused, so nothing is scheduled and no
+  // Linear read can fire until the loop is resumed.
+  const pauseBtn = document.getElementById("pause");
+  const pulse = document.querySelector(".live .pulse");
+  let boardTimer = null;
+
+  function startPolling() {
+    if (boardTimer !== null) return;
+    refresh(); // poll once now so resuming feels instant instead of waiting 2s
+    boardTimer = setInterval(refresh, 2000);
+    pulse.classList.remove("paused");
+    pauseBtn.textContent = "Pause";
+    pauseBtn.setAttribute("aria-pressed", "false");
+    pauseBtn.setAttribute("aria-label", "Pause polling");
+  }
+
+  function stopPolling() {
+    if (boardTimer === null) return;
+    clearInterval(boardTimer);
+    boardTimer = null;
+    pulse.classList.add("paused");
+    document.getElementById("updated").textContent = "paused";
+    pauseBtn.textContent = "Resume";
+    pauseBtn.setAttribute("aria-pressed", "true");
+    pauseBtn.setAttribute("aria-label", "Resume polling");
+  }
+
+  pauseBtn.addEventListener("click", () => {
+    if (boardTimer === null) startPolling();
+    else stopPolling();
+  });
+
+  // Tick the in-progress timers locally between polls for a live feel. Frozen
+  // while paused so the whole board reads as stopped, not half-live.
   setInterval(() => {
+    if (boardTimer === null) return;
     document.querySelectorAll(".timer[data-started]").forEach((el) => {
       const started = el.getAttribute("data-started");
       if (!started) return;
@@ -356,8 +404,7 @@ export const dashboardHtml = /* html */ `<!doctype html>
   }, 1000);
 
   document.getElementById("legend").innerHTML = renderLegend();
-  refresh();
-  setInterval(refresh, 2000);
+  startPolling();
 </script>
 </body>
 </html>`;
