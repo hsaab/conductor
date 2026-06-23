@@ -86,5 +86,12 @@ export interface JobsReport {
   inProgress: number;
   complete: number;
   agentsPending: number;
+  /**
+   * True when at least one fleet still has pipeline work the opportunistic
+   * reconciler can advance (pending agents, an unconfirmed merge, or an open
+   * observe window). The board route uses it to skip reconcile ticks once every
+   * fleet is settled, so an idle dashboard stops hitting Linear on every poll.
+   */
+  needsReconcile: boolean;
   jobs: JobSummary[];
 }

@@ -12,6 +12,16 @@ export const ghOwner = process.env.GH_OWNER ?? "hsaab";
 /** The repo the loop builds, deploys, and observes (short name under {@link ghOwner}). */
 export const deployTargetRepo = process.env.DEPLOY_TARGET_REPO ?? "compound";
 
+/**
+ * GitHub token used only to read pull-request merge status so the review/merge
+ * stages advance on the real merge (target repos are private). Optional: without
+ * it, conductor falls back to treating a successful deploy as proof of merge.
+ *
+ * Named `GH_TOKEN` (with a `GITHUB_TOKEN` fallback) so it does not collide with a
+ * developer's `gh`/git credentials when this token is repo-scoped to the target.
+ */
+export const githubToken = (): string => process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN ?? "";
+
 export const cursorKey = (): string => process.env.CURSOR_API_KEY ?? "";
 export const linearKey = (): string => process.env.LINEAR_API_KEY ?? "";
 export const webhookSecret = (): string => process.env.LINEAR_WEBHOOK_SECRET ?? "";
@@ -72,6 +82,8 @@ export const markers = {
   fleetComplete: "<!-- conductor:fleet-complete -->",
   /** Per-agent completion marker; keeps the reconciler from double-reporting. */
   agentDone: (agentId: string): string => `<!-- conductor:agent-done id=${agentId} -->`,
+  /** Posted once every build PR has merged to its default branch (merge stage done). */
+  merged: "<!-- conductor:merged -->",
   /** Posted when a deploy of the target repo succeeds (observability stage begins). */
   deployed: "<!-- conductor:deployed -->",
   /** Posted when the initial deploy health check passes; observe keeps monitoring. */

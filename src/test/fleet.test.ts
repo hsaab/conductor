@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { observeWindowElapsed, selectActiveFleet, summarizeJob } from "../fleet.js";
+import { jobNeedsReconcile, observeWindowElapsed, selectActiveFleet, summarizeJob } from "../fleet.js";
 import { markers } from "../config.js";
 import type { JobSummary, LinearIssuePayload } from "../types.js";
 
@@ -102,6 +102,27 @@ test("summarizeJob derives deploy/observe stages from markers", () => {
   assert.equal(job.stages.deploy, "done");
   assert.equal(job.stages.observe, "running");
   assert.equal(job.agents[0].prUrl, "https://github.com/hsaab/compound/pull/7");
+});
+
+test("summarizeJob completes review/merge on PR merge, before any deploy", () => {
+  // The `merged` marker (written once the reconciler confirms the PR merged on
+  // GitHub) advances review/merge independently of the Vercel deploy. Deploy then
+  // reads as running until the deployment.succeeded webhook lands.
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}\nPR: https://github.com/hsaab/compound/pull/52` },
+      { body: markers.fleetComplete },
+      { body: `${markers.merged}\n**🔀 Merged**` },
+    ]),
+    NOW,
+  );
+  assert.equal(job.stages.build, "done");
+  assert.equal(job.stages.review, "done");
+  assert.equal(job.stages.merge, "done");
+  assert.equal(job.stages.deploy, "running");
+  assert.equal(job.stages.observe, "pending");
 });
 
 test("summarizeJob shows remediate running on alert, then done once the hotfix PR lands", () => {
@@ -294,4 +315,43 @@ test("summarizeJob exposes a chronological activity feed for the dashboard", () 
   assert.equal(job.events[0].stage, "plan");
   assert.equal(job.events[2].message, "Cursor compound agent finished");
   assert.equal(job.events[2].stage, "build");
+});
+
+test("jobNeedsReconcile is true while build agents are still pending", () => {
+  const job = summarizeJob(
+    issue([{ body: markers.fleetStarted }, { body: compoundSpawn }]),
+    NOW,
+  );
+  assert.equal(jobNeedsReconcile(job), true);
+});
+
+test("jobNeedsReconcile is false once observe window closed cleanly", () => {
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}` },
+      { body: markers.fleetComplete },
+      { body: markers.deployed },
+      { body: markers.verified },
+      { body: `${markers.observeComplete}\n**✅ Observe window passed**` },
+    ]),
+    NOW,
+  );
+  assert.equal(jobNeedsReconcile(job), false);
+});
+
+test("jobNeedsReconcile is true while observe window is still open", () => {
+  const job = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}` },
+      { body: markers.fleetComplete },
+      { body: markers.deployed },
+      { body: markers.verified },
+    ]),
+    NOW,
+  );
+  assert.equal(jobNeedsReconcile(job), true);
 });
