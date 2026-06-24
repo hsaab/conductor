@@ -1,6 +1,15 @@
 {
   "version": 2,
-  "builds": [{ "src": "src/index.ts", "use": "@vercel/node" }],
+  "builds": [
+    {
+      "src": "src/index.ts",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": "node_modules/.pnpm/**/sqlite3/**",
+        "maxDuration": 60
+      }
+    }
+  ],
   "routes": [{ "src": "/(.*)", "dest": "src/index.ts" }],
   "crons": [{ "path": "/api/reconcile", "schedule": "0 9 * * *" }]
 }
