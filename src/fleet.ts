@@ -90,12 +90,15 @@ A Cursor planner agent is reading the ticket to decide which repos need work.`,
     );
     console.log(`[fleet] Reacted 🚀 on ${issue.identifier}; planner agent is reading the ticket`);
 
-    const plan = await planFleet(issue);
+    const { tasks: plan, usedFallback } = await planFleet(issue);
 
+    const planHeadline = usedFallback
+      ? `⚠️ Planner unavailable — defaulting to ${plan.length} agent(s)`
+      : `🧭 Planner chose ${plan.length} agent(s)`;
     await postComment(
       issue.id,
       `${markers.bridge}
-**🧭 Planner chose ${plan.length} agent(s)**
+**${planHeadline}**
 
 Repos:
 ${planTaskList(plan)}`,

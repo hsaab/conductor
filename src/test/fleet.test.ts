@@ -7,6 +7,7 @@ import type { JobSummary, LinearIssuePayload } from "../types.js";
 
 const NOW = Date.parse("2026-06-02T12:00:00.000Z");
 const compoundSpawn = `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`bc-aaa-111\`\nRepo: \`hsaab/compound\``;
+const serverSpawn = `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`bc-bbb-222\`\nRepo: \`hsaab/server\``;
 
 function issue(comments: Array<{ body: string; createdAt?: string }>): LinearIssuePayload {
   return { id: "i", identifier: "ENG-9", title: "T", state: { name: "In Progress" }, comments };
@@ -26,6 +27,45 @@ test("summarizeJob reports an in-progress fleet's start time and elapsed seconds
   assert.equal(job.completedAt, undefined);
   assert.equal(job.updatedAt, "2026-06-02T11:58:01.000Z");
   assert.equal(job.agentsPending, 1);
+});
+
+test("summarizeJob tracks one agent per repo across a multi-repo ticket", () => {
+  // FE-5 fans out to compound + server. Each spawn is its own marker comment, so
+  // the comment-thread state store records one agent per repo. Build stays running
+  // until BOTH agents report done, then completes — neither repo is dropped.
+  const pending = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: serverSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}\nPR: https://github.com/hsaab/compound/pull/7` },
+    ]),
+    NOW,
+  );
+  assert.deepEqual(
+    pending.agents.map((agent) => agent.repo).sort(),
+    ["hsaab/compound", "hsaab/server"],
+  );
+  assert.equal(pending.agentsPending, 1);
+  assert.equal(pending.stages.build, "running");
+
+  const bothDone = summarizeJob(
+    issue([
+      { body: markers.fleetStarted },
+      { body: compoundSpawn },
+      { body: serverSpawn },
+      { body: `${markers.agentDone("bc-aaa-111")}\nPR: https://github.com/hsaab/compound/pull/7` },
+      { body: `${markers.agentDone("bc-bbb-222")}\nPR: https://github.com/hsaab/server/pull/3` },
+      { body: markers.fleetComplete },
+    ]),
+    NOW,
+  );
+  assert.equal(bothDone.agentsPending, 0);
+  assert.equal(bothDone.stages.build, "done");
+  assert.equal(
+    bothDone.agents.find((agent) => agent.repo === "hsaab/server")?.prUrl,
+    "https://github.com/hsaab/server/pull/3",
+  );
 });
 
 test("summarizeJob derives pipeline stages: build running while agents pending", () => {
