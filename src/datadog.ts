@@ -1,19 +1,20 @@
 /**
- * Minimal Datadog client for conductor's own deploy-health checks. This is the
- * read path conductor uses to confirm a deploy is healthy before announcing it.
- * The richer per-span context for remediation comes from the Datadog MCP that
- * the spawned remediation agent uses.
+ * Minimal Datadog client for conductor's own post-deploy error scan. This is the
+ * read path conductor uses to surface errors that are already in production at
+ * deploy time. It never asserts health; the all-clear verdict is produced later,
+ * at observe-window close. The richer per-span context for remediation comes from
+ * the Datadog MCP that the spawned remediation agent uses.
  *
  * Entirely optional: if no Datadog keys are configured, {@link checkServiceHealth}
- * returns an "unknown" result and conductor assumes healthy, so the loop never
- * blocks on Datadog being wired up.
+ * returns an "unknown" result and conductor simply has nothing to warn about, so
+ * the loop never blocks on Datadog being wired up.
  */
 import { datadogApiKey, datadogAppKey, datadogSite } from "./config.js";
 
 export interface ServiceHealth {
   /** Number of error logs in the window, or null when Datadog is not configured/queryable. */
   errors: number | null;
-  /** True when we have no error signal (no keys or query failed) and assume healthy. */
+  /** True when we have no error signal (no keys or query failed), so there is nothing to warn about. */
   unknown: boolean;
 }
 

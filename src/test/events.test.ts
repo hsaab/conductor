@@ -51,7 +51,7 @@ test("parseEvents sorts out-of-order comments and ignores non-conductor noise", 
 test("parseEvents tags each pipeline stage from its hidden marker", () => {
   const events = parseEvents(
     issue([
-      { body: `${markers.verified}\n${markers.announced}\n**🔭 Observability:** healthy.`, createdAt: "2026-06-02T13:00:00.000Z" },
+      { body: `${markers.verified}\n${markers.announced}\n**🔭 Observability:** scanning production logs and errors.`, createdAt: "2026-06-02T13:00:00.000Z" },
       { body: `${markers.remediationDone("bc-fix-222")}\n**🛠️ Hotfix PR opened**`, createdAt: "2026-06-02T14:00:00.000Z" },
     ]),
   );

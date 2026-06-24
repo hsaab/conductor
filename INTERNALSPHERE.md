@@ -83,7 +83,7 @@ Values to use (pull from the current `.env` / personal Vercel project):
 | `CRON_SECRET` | Vercel Cron auth for `/api/reconcile` |
 | `VERCEL_WEBHOOK_SECRET` | guards `/webhook/vercel` |
 | `DATADOG_WEBHOOK_SECRET` | guards `/webhook/datadog` |
-| `DD_API_KEY` / `DD_APP_KEY` / `DD_SITE` | optional Datadog deploy-health query |
+| `DD_API_KEY` / `DD_APP_KEY` / `DD_SITE` | optional Datadog post-deploy error scan |
 | `SLACK_WEBHOOK_URL` | Slack output for deploy/remediation stages |
 | `GH_OWNER` | GitHub owner for target repos |
 | `DEPLOY_TARGET_REPO` | repo whose deploys/alerts close the loop |

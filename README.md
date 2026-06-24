@@ -22,12 +22,16 @@ flowchart TD
   PR --> Bugbot["Bugbot review"]
   Bugbot --> Merge["Human merges PR"]
   Merge --> Vercel["Vercel auto-deploys"]
-  Vercel -->|deployment.succeeded| VHook["conductor /webhook/vercel"]
-  VHook --> Obs["Deploy-health check"]
-  Obs --> Slack1["Slack: shipped + healthy"]
   Vercel --> Prod["production"]
+  Vercel -->|deployment.succeeded| VHook["conductor /webhook/vercel"]
+  VHook --> Obs["Record deploy<br/>open observe window"]
+  Obs --> Slack1["Slack: shipped, now scanning logs + errors"]
+  Obs --> Observe["Observe window<br/>OBSERVE_WINDOW_MS"]
+  Cron["/api/reconcile cron"] -->|reports PRs| Linear
+  Cron -->|window elapsed, no alerts| Clear["Slack: all clear<br/>observe-complete verdict"]
+  Observe -.->|polled by| Cron
   Synthetic["Datadog Synthetic / monitor"] --> Prod
-  Synthetic -->|alert| DHook["conductor /webhook/datadog"]
+  Synthetic -->|alert during observe window| DHook["conductor /webhook/datadog"]
   DHook --> Remediate["Remediation agent<br/>opens hotfix PR"]
   Remediate --> Slack2["Slack: latency detected + hotfix PR"]
   Remediate -.->|hotfix PR re-enters loop| PR
@@ -45,11 +49,14 @@ flowchart TD
    by removing the reaction and deleting conductor comments.
 2. **Reconcile** (`/api/reconcile`): runs out-of-band on a Vercel Cron. It finds
    launched fleets from Linear comments, recovers each agent's run via
-   `Agent.listRuns`, and posts completion comments with PR URLs once runs are
-   terminal. Idempotent per-agent `agent-done` markers prevent duplicate reports.
+   `Agent.listRuns`, and posts completion comments with PR URLs once a run opens
+   its PR (or the run finishes). Idempotent per-agent `agent-done` markers prevent
+   duplicate reports.
 3. **Deploy + observe** (`/webhook/vercel`): a successful production deployment
-   of the target repo marks the matching fleet deployed, runs a deploy-health
-   check, and announces the result to Slack.
+   of the target repo marks the matching fleet deployed, scans for errors already
+   in production, and posts a "shipped, now scanning" note to Slack. The all-clear
+   verdict comes later, when the reconciler closes the observe window with no
+   alerts.
 4. **Remediate** (`/webhook/datadog`): a Datadog alert attaches to the active
    deployed fleet, announces the problem to Slack, and dispatches a remediation
    cloud agent that opens a hotfix PR.
@@ -74,8 +81,8 @@ in Linear comment markers:
 | Build | after planning | One fleet cloud agent per task opens a PR |
 | Review | PR opened | Bugbot reviews the PR |
 | Merge | human merges the PR | Conductor confirms the merge via the GitHub API (the reconciler writes a `merged` marker) |
-| Deploy | Vercel `deployment.succeeded` (`/webhook/vercel`) | Conductor records deploy and checks health |
-| Observe | deploy-health check + Datadog monitors | Slack announcement and ongoing production signal |
+| Deploy | Vercel `deployment.succeeded` (`/webhook/vercel`) | Conductor records the deploy and opens the observe window (scanning for errors already present) |
+| Observe | post-deploy window + Datadog monitors | Conductor watches production; the reconciler posts the all-clear when the window closes with no alerts, or remediate takes over on an alert |
 | Remediate | Datadog monitor alert (`/webhook/datadog`) | Remediation agent diagnoses and opens a hotfix PR |
 
 ## HTTP surface
@@ -114,8 +121,8 @@ request blocks on a multi-minute agent run.
 | `CRON_SECRET` | Authorize the Vercel Cron call to `/api/reconcile` |
 | `VERCEL_WEBHOOK_SECRET` | Verify `/webhook/vercel` calls |
 | `DATADOG_WEBHOOK_SECRET` | Verify `/webhook/datadog` calls |
-| `DD_API_KEY` | Datadog API key for conductor's deploy-health query (optional) |
-| `DD_APP_KEY` | Datadog application key for the health query (optional) |
+| `DD_API_KEY` | Datadog API key for conductor's post-deploy error scan (optional) |
+| `DD_APP_KEY` | Datadog application key for the error scan (optional) |
 | `DD_SITE` | Datadog site, e.g. `datadoghq.com` (default) |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook for deploy/remediation output |
 | `GH_OWNER` | GitHub org/user (default: `hsaab`) |
@@ -172,8 +179,9 @@ To register the Linear webhook by hand instead, open
    repo with its `bc-` agent ID.
 4. As each agent finishes, the reconcile cron posts a completion comment with the
    PR URL, then a final `fleet-complete` comment.
-5. After review and merge, Vercel deploys; `/webhook/vercel` records deploy/health
-   and posts to Slack.
+5. After review and merge, Vercel deploys; `/webhook/vercel` records the deploy,
+   scans for existing errors, and posts a "shipped, now scanning" note to Slack.
+   When the observe window closes with no alerts, the reconciler posts the all-clear.
 6. If Datadog alerts, `/webhook/datadog` dispatches a remediation agent whose
    hotfix PR re-enters the loop.
 7. Drag the ticket back out of **In Progress** to re-arm it; drag it back in for a

@@ -6,11 +6,25 @@
  * single warm serverless instance always sees the latest injected env values.
  */
 
+/**
+ * Reads a string env var, falling back to `fallback` when it is unset OR blank.
+ *
+ * Uses `||` on the trimmed value (not `??`) on purpose: `??` only substitutes on
+ * `null`/`undefined`, so an env var set to an empty string (e.g. `GH_OWNER=""` in
+ * a deployment) would slip through and silently poison config — blanking the
+ * owner turns every repo URL into `github.com//repo` and misroutes the planner
+ * and fleet. Trimming also guards against accidental whitespace-only values.
+ */
+function envOr(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
 /** GitHub org/user that owns the target repos. Safe to capture at load. */
-export const ghOwner = process.env.GH_OWNER ?? "hsaab";
+export const ghOwner = envOr(process.env.GH_OWNER, "hsaab");
 
 /** The repo the loop builds, deploys, and observes (short name under {@link ghOwner}). */
-export const deployTargetRepo = process.env.DEPLOY_TARGET_REPO ?? "compound";
+export const deployTargetRepo = envOr(process.env.DEPLOY_TARGET_REPO, "compound");
 
 /**
  * GitHub token used only to read pull-request merge status so the review/merge
@@ -46,7 +60,7 @@ export const datadogApiKey = (): string => process.env.DD_API_KEY ?? "";
 export const datadogAppKey = (): string => process.env.DD_APP_KEY ?? "";
 
 /** Datadog site (e.g. datadoghq.com, us5.datadoghq.com). Defaults to US1. */
-export const datadogSite = (): string => process.env.DD_SITE ?? "datadoghq.com";
+export const datadogSite = (): string => envOr(process.env.DD_SITE, "datadoghq.com");
 
 /**
  * How long the observe stage keeps monitoring for production alerts before
@@ -56,10 +70,10 @@ export const datadogSite = (): string => process.env.DD_SITE ?? "datadoghq.com";
 export const observeWindowMs = (): number => Number(process.env.OBSERVE_WINDOW_MS ?? 120_000);
 
 /** Cloud model used for every spawned agent. Override with `BRIDGE_MODEL_ID`. */
-export const modelId = process.env.BRIDGE_MODEL_ID ?? "composer-2.5";
+export const modelId = envOr(process.env.BRIDGE_MODEL_ID, "composer-2.5");
 
 /** Cursor model the planner agent uses to read the ticket. Override with `PLANNER_MODEL_ID`. */
-export const plannerModelId = process.env.PLANNER_MODEL_ID ?? "composer-2.5";
+export const plannerModelId = envOr(process.env.PLANNER_MODEL_ID, "composer-2.5");
 
 /** Upper bound on agents spawned per ticket. */
 export const maxAgents = Number(process.env.MAX_AGENTS ?? 6);
@@ -86,7 +100,7 @@ export const markers = {
   merged: "<!-- conductor:merged -->",
   /** Posted when a deploy of the target repo succeeds (observability stage begins). */
   deployed: "<!-- conductor:deployed -->",
-  /** Posted when the initial deploy health check passes; observe keeps monitoring. */
+  /** Posted when the deploy is recorded and the observe window opens (scanning begins). */
   verified: "<!-- conductor:verified -->",
   /** Posted when the observe window elapsed with no alerts — remediation not needed. */
   observeComplete: "<!-- conductor:observe-complete -->",

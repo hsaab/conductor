@@ -125,21 +125,23 @@ poll `GET $BRIDGE_URL/api/board` and read `jobs[].stages`.
 | review | build done → the PR(s) merged | `merged` (or `deployed`) | Bugbot on GitHub |
 | merge | every build PR merged to its default branch | `merged` (a deploy also implies it) | human merges PR; reconcile confirms via GitHub |
 | deploy | Vercel `deployment.succeeded` arrived | `deployed` | `/webhook/vercel` |
-| observe | deploy health verified + announced | `verified`, `announced` | `/webhook/vercel` health check |
+| observe | the post-deploy window closed with no alerts | `observe-complete` (or `remediated`) | `/api/reconcile` closes the window; `/webhook/datadog` on an alert |
 | remediate | hotfix PR opened by remediation agent | `remediated` (running) → `remediation-done` (done) | `/webhook/datadog` + `/api/reconcile` |
 
-**Critical operational note:** `build`, the PR URLs, and `merge` only advance
-after a `/api/reconcile` pass — it reads finished cloud runs and checks PR merge
-status on GitHub (needs `GH_TOKEN`). `deploy`/`observe` advance automatically
-via the Vercel webhook. Run reconcile on a cadence during the demo (section 5.1).
+**Critical operational note:** `build`, the PR URLs, `merge`, and the `observe`
+window close only advance after a `/api/reconcile` pass. That pass reads finished
+cloud runs, checks PR merge status on GitHub (needs `GH_TOKEN`), and closes the
+observe window once it elapses. Only `deploy` advances on its own via the Vercel
+webhook. Run reconcile on a cadence during the demo (section 5.1).
 
 ---
 
 ## 3. Act 1 — happy path (FE-7, "AI advisor chat")
 
 **Narrative:** drag a ticket; a planner reads it, a cloud agent builds it and opens a
-PR, Bugbot reviews, you merge, Vercel deploys, conductor verifies health and posts
-"shipped + healthy" to Slack — all tracked live on the dashboard.
+PR, Bugbot reviews, you merge, Vercel deploys, and conductor records the deploy and
+posts "shipped, now scanning" to Slack, then the all-clear once the observe window
+closes. The dashboard tracks it all live.
 
 ### Beat A1 — Engage
 - **Action:** in Linear, move **FE-7** to **In Progress**.
@@ -168,19 +170,25 @@ PR, Bugbot reviews, you merge, Vercel deploys, conductor verifies health and pos
   ```
   Expect `done: true` and a `prUrl` once the run is terminal; `build: done`.
 
-### Beat A4 — Merge → Deploy
+### Beat A4 — Merge → Deploy → Observe
 - **Action:** merge the PR to `main` on GitHub.
 - **Expected (≤2–3 min):** Vercel auto-deploys compound; `/webhook/vercel` fires;
-  conductor posts `deployed` then `verified`; Slack shows **"✅ compound shipped and
-  healthy"**; dashboard `merge/deploy/observe: done`.
+  conductor posts `deployed` then `verified`; Slack shows **"🚀 compound shipped to
+  production"** with a "now scanning logs + errors" line; dashboard `merge/deploy: done`,
+  `observe: running`. The deploy makes no health claim yet.
+- **Then (after the observe window, `OBSERVE_WINDOW_MS`, default 2 min):** a reconcile
+  pass posts `observe-complete` and Slack shows **"✅ FE-7 — monitoring passed"**;
+  `observe: done`.
 - **Verify:**
   ```bash
   curl -s "$BRIDGE_URL/api/board" | jq '.jobs[] | select(.identifier=="FE-7") | .stages'
   ```
-  Expect `deploy: done`, `observe: done`. Confirm the Slack message arrived.
+  Expect `deploy: done`, `observe: running` right after the deploy, flipping to
+  `observe: done` once the window closes (keep the reconcile loop in 5.1 running).
+  Confirm both Slack messages arrived.
 - **Fallback:** if the Vercel webhook is missed, replay it (section 5.3).
 
-Act 1 ends with FE-7 shipped and healthy.
+Act 1 ends with FE-7 shipped and the observe window closing clean (Slack posts the all-clear).
 
 ---
 
@@ -195,8 +203,9 @@ that opens a hotfix PR restoring batching/caching — re-entering the loop at re
 ### Beat B1 — Ship the regression
 - **Action:** move **FE-13** to **In Progress**; let it build, then merge its PR to
   `main` (same as Beats A1–A4 for FE-13).
-- **Expected:** FE-13 deploys; Slack posts shipped (health may still read healthy at
-  this instant — the synthetic is the latency detector, not the log query).
+- **Expected:** FE-13 deploys; Slack posts that it shipped and is now scanning.
+  Conductor's deploy-time scan only counts error logs, so it will not flag the
+  latency; the Datadog synthetic is the latency detector.
 - **Verify regression is real (do this in rehearsal):**
   ```bash
   curl -s "https://compound-kappa-one.vercel.app/api/market/quotes-check" | jq '.durationMs'
@@ -280,7 +289,7 @@ remediated fleet. Only use after FE-13 has deployed.
 |---|---|---|
 | Engage → plan → build spawned | ~60s | ~15s |
 | Build agent → PR opened | 3–8 min | pre-run before the call |
-| Merge → Vercel deploy → Slack healthy | 2–3 min | unchanged |
+| Merge → Vercel deploy → Slack shipped | 2–3 min | unchanged |
 | Regression deploy → synthetic fails | up to 2 min (60s tick) | unchanged |
 | Alert → remediation PR opened | 3–8 min | pre-run before the call |
 
