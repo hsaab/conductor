@@ -6,6 +6,7 @@ import {
   normalizeKind,
   parsePlanText,
   parseTicketRepos,
+  planFleet,
   sanitizePlan,
   withTicketRepos,
 } from "../planner.js";
@@ -124,6 +125,20 @@ test("fallbackPlan honors a single explicitly named repo without forcing the dep
   );
 });
 
+test("fallbackPlan honors FE-13's repo line and Bug label", () => {
+  const issue = {
+    identifier: "FE-13",
+    title: "Portfolio prices look stale — make holding quotes real-time",
+    description: "* Repo: `hsaab/compound`",
+    labels: [{ name: "cursor-fleet" }, { name: "Bug" }],
+  } as LinearIssuePayload;
+
+  assert.deepEqual(
+    fallbackPlan(issue).map(({ repo, kind }) => ({ repo, kind })),
+    [{ repo: "hsaab/compound", kind: "bug" }],
+  );
+});
+
 test("fallbackPlan infers the task kind from the ticket (bug here)", () => {
   const issue = {
     identifier: "FE-13",
@@ -131,6 +146,31 @@ test("fallbackPlan infers the task kind from the ticket (bug here)", () => {
     description: "",
   } as LinearIssuePayload;
   assert.equal(fallbackPlan(issue)[0].kind, "bug");
+});
+
+test("planFleet explains local fallback when CURSOR_API_KEY is missing", async () => {
+  const previousKey = process.env.CURSOR_API_KEY;
+  delete process.env.CURSOR_API_KEY;
+
+  try {
+    const issue = {
+      identifier: "FE-13",
+      title: "Portfolio prices look stale — make holding quotes real-time",
+      description: "Quotes should refresh from live market data.",
+      labels: [{ name: "cursor-fleet" }],
+    } as LinearIssuePayload;
+
+    const plan = await planFleet(issue);
+    assert.equal(plan.usedFallback, true);
+    assert.equal(plan.fallbackReason, "missing CURSOR_API_KEY");
+    assert.deepEqual(plan.tasks.map((task) => task.repo), ["hsaab/compound"]);
+  } finally {
+    if (previousKey === undefined) {
+      delete process.env.CURSOR_API_KEY;
+    } else {
+      process.env.CURSOR_API_KEY = previousKey;
+    }
+  }
 });
 
 test("parseTicketRepos reads a comma-separated Repos: line", () => {

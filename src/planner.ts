@@ -241,15 +241,30 @@ const plannerHostRepo = `https://github.com/${ghOwner}/${knownRepos[0].repo}`;
 export interface FleetPlan {
   tasks: PlannedTask[];
   usedFallback: boolean;
+  fallbackReason?: string;
+}
+
+function fallbackFleetPlan(issue: LinearIssuePayload, fallbackReason: string): FleetPlan {
+  const plan = fallbackPlan(issue);
+  console.log(
+    `[planner] Fallback plan (${fallbackReason}): ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`,
+  );
+  return { tasks: plan, usedFallback: true, fallbackReason };
 }
 
 /** Reads the ticket via a Cursor cloud agent and returns one task per repo it chose. */
 export async function planFleet(issue: LinearIssuePayload): Promise<FleetPlan> {
   console.log(`[planner] Reading ${issue.identifier} "${issue.title}" with a Cursor agent to decide which repos need work`);
+  const apiKey = cursorKey().trim();
+  if (!apiKey) {
+    console.error("[planner] Missing CURSOR_API_KEY; using fallback");
+    return fallbackFleetPlan(issue, "missing CURSOR_API_KEY");
+  }
+
   try {
     const { Agent } = await import("@cursor/sdk");
     const result = await Agent.prompt(buildPlannerPrompt(issue), {
-      apiKey: cursorKey(),
+      apiKey,
       model: { id: plannerModelId },
       cloud: {
         repos: [{ url: plannerHostRepo }],
@@ -266,13 +281,13 @@ export async function planFleet(issue: LinearIssuePayload): Promise<FleetPlan> {
         return { tasks: plan, usedFallback: false };
       }
       console.log("[planner] Could not parse a plan from the agent reply, using fallback");
+      return fallbackFleetPlan(issue, "planner returned no parseable plan");
     } else {
       console.log(`[planner] Planner run did not finish (status: ${result.status}), using fallback`);
+      return fallbackFleetPlan(issue, `planner run ${result.status}`);
     }
   } catch (err) {
     console.error("[planner] Planning failed, using fallback:", err);
+    return fallbackFleetPlan(issue, "planner startup failed");
   }
-  const plan = fallbackPlan(issue);
-  console.log(`[planner] Fallback plan: ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`);
-  return { tasks: plan, usedFallback: true };
 }

@@ -1,0 +1,25 @@
+# Single home for pnpm settings across pnpm 9/10/11. conductor is one package,
+# not a real monorepo; the `packages` key exists only so pnpm 9 accepts this file
+# (pnpm 9 reads any pnpm-workspace.yaml as a workspace and aborts with "packages
+# field missing or empty" when it lacks one).
+#
+# sqlite3 is the native dependency @cursor/sdk loads at import time. Its build
+# script must run or `import("@cursor/sdk")` throws "Could not locate the bindings
+# file", which the planner and fleet swallow into a silent fallback ("Planner
+# unavailable"). Each pnpm major gates build scripts differently, so sqlite3 is
+# allow-listed both ways: `allowBuilds` for pnpm 11 (which removed the older keys
+# and, with strictDepBuilds defaulting to true, errors on any build-script package
+# not listed here) and `onlyBuiltDependencies` for pnpm 9/10. esbuild ships
+# prebuilt platform binaries and needs no build step, so it is declared false to
+# satisfy pnpm 11's strict check without building it.
+packages:
+  - .
+allowBuilds:
+  sqlite3: true
+  esbuild: false
+onlyBuiltDependencies:
+  - sqlite3
+# pnpm 11 reads only auth/registry settings from .npmrc, so this mirrors the
+# .npmrc `verify-deps-before-run` (kept there for pnpm 9/10): keep `pnpm <script>`
+# from running an implicit install/deps check first, which aborts the run in CI.
+verifyDepsBeforeRun: false

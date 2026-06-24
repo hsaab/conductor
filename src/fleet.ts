@@ -51,6 +51,10 @@ function planTaskList(tasks: PlannedTask[]): string {
   return tasks.map((task) => `- \`${task.repo}\` (${task.kind})`).join("\n");
 }
 
+function fallbackDetail(reason: string | undefined): string {
+  return reason ? ` (${reason})` : "";
+}
+
 /**
  * Plans tasks from the ticket, posts the durable `fleetStarted` marker, then
  * spawns one cloud agent per planned task. Returns once all agents have been
@@ -90,10 +94,10 @@ A Cursor planner agent is reading the ticket to decide which repos need work.`,
     );
     console.log(`[fleet] Reacted 🚀 on ${issue.identifier}; planner agent is reading the ticket`);
 
-    const { tasks: plan, usedFallback } = await planFleet(issue);
+    const { tasks: plan, usedFallback, fallbackReason } = await planFleet(issue);
 
     const planHeadline = usedFallback
-      ? `⚠️ Planner unavailable — defaulting to ${plan.length} agent(s)`
+      ? `⚠️ Planner fallback${fallbackDetail(fallbackReason)} — defaulting to ${plan.length} agent(s)`
       : `🧭 Planner chose ${plan.length} agent(s)`;
     await postComment(
       issue.id,

@@ -22,9 +22,5 @@
     "@types/node": "^22.13.10",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
-  },
-  "pnpm": {
-    "//": "sqlite3 is a native dep of @cursor/sdk and MUST compile its binding, or every SDK import throws 'Could not locate the bindings file' on Vercel's clean install (the planner + agent-spawn then silently fall back). An explicit allowlist guarantees the build across pnpm 9/10/11; esbuild is omitted on purpose since it ships prebuilt platform packages and needs no build script.",
-    "onlyBuiltDependencies": ["sqlite3"]
   }
 }
