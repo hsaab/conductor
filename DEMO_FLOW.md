@@ -318,11 +318,21 @@ rehearsal PRs so `main` is back to the fast baseline before the real run.
   one `cursor-fleet` ticket through deploy/observe/remediate at a time.** Let FE-7
   fully ship (or reach `observe: done`) before moving FE-13 to In Progress; during
   Act 2, no other fleet should be in the deploy/remediate stages.
-- **Regression must exceed 1500ms.** If FE-13's change only drops the TTL cache but
-  keeps batching, a premium AlphaVantage key may still resolve under 1500ms. Mitigate
-  by ensuring the regression is an N+1 (per-holding fetch in a loop), or lower the
-  synthetic threshold via `RESPONSE_TIME_MS` and re-run `scripts/setup-datadog.mjs`
-  (idempotent). Always confirm Beat B1's `durationMs > 1500` in rehearsal.
+- **Regression must exceed 1500ms — now guaranteed by the ticket, not luck.** FE-13's
+  acceptance criteria deterministically force the slow path: resolve each holding with
+  an independent per-symbol `GLOBAL_QUOTE` (no batching/bulk endpoint) and pace the
+  sequential calls **≥250ms apart**. With the 20-ticker `quotes-check` basket that is
+  19 gaps × 250ms ≈ **4,750ms** of pure pacing delay before any network time —
+  roughly 3× the 1500ms threshold, independent of the AlphaVantage key tier or network
+  speed. (The old risk was that merely dropping the TTL while keeping batching could
+  still resolve under 1500ms on a premium key; the pacing requirement removes that.)
+  The 4.75s figure is deliberately kept under Vercel's function timeout so the route
+  returns a clean slow `200` with timing rather than erroring. Still confirm Beat B1's
+  `durationMs > 1500` in rehearsal, and note the guarantee depends on the build agent
+  obeying the criteria — the pre-warmed `cursor/fe-13-realtime-quotes-regression` PR
+  (section 6) and the §5.4 alert replay remain the backstops. If you ever need to widen
+  margin further, raise the pacing in the ticket or lower the synthetic threshold via
+  `RESPONSE_TIME_MS` and re-run `scripts/setup-datadog.mjs` (idempotent).
 - **Cloud agent latency.** Pre-warm (section 6). Never block the narrative on a live
   multi-minute run.
 - **Webhook misses.** Every webhook has a manual replay (sections 5.2–5.4).
