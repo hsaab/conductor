@@ -8,7 +8,7 @@
  * per invocation — so during planning the live customer-facing progression is on
  * the Linear ticket (the bridge posts comments as it goes), not `vercel logs`.
  */
-import { cursorKey, ghOwner, maxAgents, plannerModelId } from "./config.js";
+import { cursorKey, deployTargetRepo, ghOwner, maxAgents, plannerModelId } from "./config.js";
 import type { LinearIssuePayload } from "./types.js";
 
 /**
@@ -86,6 +86,60 @@ export function parsePlanText(text: string): PlannedTask[] {
   }
 }
 
+/** Escapes a string for literal use inside a RegExp (ghOwner is env-sourced). */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Repos a ticket *explicitly* names, so an inherently multi-repo ticket fans out
+ * to one agent per repo even when the LLM planner is unavailable or under-plans.
+ *
+ * Two explicit signals, both unambiguous intent:
+ *   1. A structured `Repos:`/`Repo:` line, e.g. `Repos: server, compound` or
+ *      `Repos: hsaab/server, hsaab/compound` (comma/space/`and`-separated).
+ *   2. An owner-qualified slug `${ghOwner}/<repo>` appearing ANYWHERE in the
+ *      title/description, e.g. FE-5's bulleted `hsaab/compound` + `hsaab/server`.
+ *
+ * Markdown emphasis can mangle a slug. FE-5 lists `**hsaab/****compound**`, whose
+ * raw bytes are `hsaab/****compound` (adjacent bold runs collapse into `****`).
+ * `*` and backticks are never valid in a GitHub owner or repo name, so removing
+ * them first repairs the slug while leaving valid characters (`_`, `-`, `.`)
+ * intact; wrapping `_`/`.` left by italic emphasis is trimmed off each slug.
+ *
+ * The over-spawn guard is structural, not a convention. Bare prose words are
+ * never matched: "the server returned 500" has no `Repos:` line and no
+ * `hsaab/server` slug, so it selects nothing. That over-spawn is the exact
+ * failure the single-repo fallback was first introduced to stop. A cross-org
+ * slug (`acme/web`) must be declared on a `Repos:` line, never inferred from prose.
+ *
+ * Returns raw names (bare or `owner/repo`); {@link sanitizePlan} owner-qualifies
+ * and de-duplicates them.
+ */
+export function parseTicketRepos(issue: LinearIssuePayload): string[] {
+  // Neutralize emphasis/code formatting that can split a slug (e.g. `hsaab/****server`).
+  const text = `${issue.title ?? ""}\n${issue.description ?? ""}`.replace(/[`*]/g, "");
+  const names = new Set<string>();
+
+  // 1. Structured `Repos:`/`Repo:` line: bare names or slugs, any separator.
+  for (const line of text.matchAll(/^[ \t>_-]*repos?\s*:\s*(.+)$/gim)) {
+    for (const token of line[1].split(/[,\s]+/)) {
+      const name = token.replace(/^[_<]+|[_>.,;]+$/g, "").trim();
+      if (name && name.toLowerCase() !== "and") names.add(name);
+    }
+  }
+
+  // 2. Owner-qualified slugs anywhere. Owner-qualified ONLY, so a bare word in
+  //    prose never selects a repo — that is the over-spawn guard.
+  const slugRe = new RegExp(`(?<![\\w./-])${escapeRegExp(ghOwner)}/([A-Za-z0-9._-]+)`, "gi");
+  for (const match of text.matchAll(slugRe)) {
+    const repo = match[1].replace(/^[_.]+|[_.]+$/g, "");
+    if (repo) names.add(`${ghOwner}/${repo}`);
+  }
+
+  return [...names];
+}
+
 function buildPlannerPrompt(issue: LinearIssuePayload): string {
   const labels = issue.labels?.map((l) => l.name).join(", ") || "(none)";
   const hints = knownRepos.map((r) => `- ${ghOwner}/${r.repo}: ${r.description}`).join("\n");
@@ -131,13 +185,45 @@ function inferKindFromIssue(issue: LinearIssuePayload): TaskKind {
   return "feature";
 }
 
-function fallbackPlan(issue: LinearIssuePayload): PlannedTask[] {
+/** A default-instruction task for each repo the ticket explicitly names. */
+function namedRepoTasks(issue: LinearIssuePayload): PlannedTask[] {
   const kind = inferKindFromIssue(issue);
-  return knownRepos.map((r) => ({
-    repo: `${ghOwner}/${r.repo}`,
-    instructions: defaultInstructions(issue),
-    kind,
-  }));
+  return parseTicketRepos(issue).map((repo) => ({ repo, instructions: defaultInstructions(issue), kind }));
+}
+
+/**
+ * Folds the repos a ticket explicitly names into a planned task list, so an
+ * inherently multi-repo ticket always fans out to one agent per repo even if the
+ * planner agent omitted one. The planner's own tasks come first, so its
+ * repo-specific instructions win for any repo it did plan; a named repo it
+ * skipped is appended with default instructions. {@link sanitizePlan}
+ * owner-qualifies, de-duplicates, and caps the result.
+ */
+export function withTicketRepos(tasks: PlannedTask[], issue: LinearIssuePayload): PlannedTask[] {
+  return sanitizePlan([...tasks, ...namedRepoTasks(issue)]);
+}
+
+/**
+ * Fallback when the planner agent can't produce a plan. It still honors the
+ * repos the ticket explicitly names (one agent per repo) so an inherently
+ * multi-repo ticket like FE-5 — add X-Request-ID middleware to both `compound`
+ * and `server` — fans out correctly without the planner agent. Only when the
+ * ticket names no repos does it conservatively target the single deploy target.
+ *
+ * This threads the needle between the two ways the fallback has been wrong: it
+ * must not blast an agent at every known repo (a single-repo ticket wrongly got
+ * both `compound` and `server`), and it must not collapse every ticket to the
+ * deploy target (a multi-repo ticket wrongly got only `compound`). Named repos
+ * are precise intent; an unnamed ticket gets the conservative single agent.
+ * The caller surfaces that this is a fallback.
+ */
+export function fallbackPlan(issue: LinearIssuePayload): PlannedTask[] {
+  const named = namedRepoTasks(issue);
+  const tasks =
+    named.length > 0
+      ? named
+      : [{ repo: deployTargetRepo, instructions: defaultInstructions(issue), kind: inferKindFromIssue(issue) }];
+  return sanitizePlan(tasks);
 }
 
 /**
@@ -147,8 +233,18 @@ function fallbackPlan(issue: LinearIssuePayload): PlannedTask[] {
  */
 const plannerHostRepo = `https://github.com/${ghOwner}/${knownRepos[0].repo}`;
 
+/**
+ * The outcome of planning a ticket: the task list plus whether it came from the
+ * planner agent or the conservative fallback. `usedFallback` lets the caller be
+ * honest on the ticket — a fallback is not a deliberate multi-repo decision.
+ */
+export interface FleetPlan {
+  tasks: PlannedTask[];
+  usedFallback: boolean;
+}
+
 /** Reads the ticket via a Cursor cloud agent and returns one task per repo it chose. */
-export async function planFleet(issue: LinearIssuePayload): Promise<PlannedTask[]> {
+export async function planFleet(issue: LinearIssuePayload): Promise<FleetPlan> {
   console.log(`[planner] Reading ${issue.identifier} "${issue.title}" with a Cursor agent to decide which repos need work`);
   try {
     const { Agent } = await import("@cursor/sdk");
@@ -162,10 +258,12 @@ export async function planFleet(issue: LinearIssuePayload): Promise<PlannedTask[
       },
     });
     if (result.status === "finished" && result.result) {
-      const plan = sanitizePlan(parsePlanText(result.result));
+      // Union in any repo the ticket explicitly names but the agent omitted, so
+      // an explicitly multi-repo ticket never silently drops a repo to the LLM.
+      const plan = withTicketRepos(parsePlanText(result.result), issue);
       if (plan.length) {
         console.log(`[planner] Plan: ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`);
-        return plan;
+        return { tasks: plan, usedFallback: false };
       }
       console.log("[planner] Could not parse a plan from the agent reply, using fallback");
     } else {
@@ -176,5 +274,5 @@ export async function planFleet(issue: LinearIssuePayload): Promise<PlannedTask[
   }
   const plan = fallbackPlan(issue);
   console.log(`[planner] Fallback plan: ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`);
-  return plan;
+  return { tasks: plan, usedFallback: true };
 }
