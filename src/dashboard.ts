@@ -181,6 +181,18 @@ export const dashboardHtml = /* html */ `<!doctype html>
   .log-empty { color: var(--muted); font-size: 13px; }
   .empty { color: var(--muted); text-align: center; padding: 60px 0; font-size: 14px; }
   footer { color: var(--muted); font-size: 12px; text-align: center; padding: 24px; }
+
+  /* Deploy-health banner: shown when the server cannot load @cursor/sdk, so a
+     broken deploy (the silent "planner unavailable" failure) is impossible to
+     miss instead of only surfacing as fallback plans. */
+  .sdk-alert {
+    display: none; padding: 12px 28px; font-size: 13px; line-height: 1.4;
+    background: rgba(248,81,73,0.12); border-bottom: 1px solid var(--failed); color: var(--failed);
+    position: sticky; top: 61px; z-index: 2;
+  }
+  .sdk-alert.show { display: block; }
+  .sdk-alert code { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  .sdk-alert .muted { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -191,6 +203,7 @@ export const dashboardHtml = /* html */ `<!doctype html>
   <button id="pause" type="button" class="toggle" aria-pressed="false" aria-label="Pause polling">Pause</button>
 </header>
 <div class="legend" id="legend"></div>
+<div class="sdk-alert" id="sdkAlert" role="alert"></div>
 <main>
   <div id="board"><div class="empty">Loading fleets…</div></div>
 </main>
@@ -340,10 +353,27 @@ export const dashboardHtml = /* html */ `<!doctype html>
     ).join("");
   }
 
+  // Raise/lower the deploy-health banner from the board's sdk signal. A broken
+  // deploy (server can't load @cursor/sdk) becomes visible immediately instead
+  // of only as silent fallback plans.
+  function updateSdkAlert(sdk) {
+    const el = document.getElementById("sdkAlert");
+    if (!el) return;
+    if (sdk && sdk !== "ok") {
+      el.innerHTML = '<b>⚠ Planner unavailable.</b> The server cannot load <code>@cursor/sdk</code> ' +
+        '(native sqlite3 build). New fleets fall back to a degraded plan and downstream stages may stall. ' +
+        '<span class="muted">Check the latest deploy and the CI deploy guard.</span>';
+      el.classList.add("show");
+    } else {
+      el.classList.remove("show");
+    }
+  }
+
   async function refresh() {
     try {
       const res = await fetch("/api/board?all=1", { cache: "no-store" });
       const data = await res.json();
+      updateSdkAlert(data.sdk);
       const jobs = data.jobs || [];
       const board = document.getElementById("board");
       board.innerHTML = jobs.length ? jobs.map(renderJob).join("") : '<div class="empty">No fleets launched yet. Drag a cursor-fleet ticket into In Progress.</div>';

@@ -27,6 +27,7 @@ type Req = any;
 type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
+import { sdkHealth } from "./health.js";
 import { fetchIssue, hasComment, issueRefFromBody, normalizeIssue } from "./linear.js";
 import { createBoardCache } from "./boardCache.js";
 import { listJobs, reconcileAll, reconcileTick, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
@@ -120,7 +121,13 @@ app.get("/", (_req: Req, res: Res) => {
   res.status(200).set("Content-Type", "text/html; charset=utf-8").send(dashboardHtml);
 });
 
-app.get("/api/health", (_req: Req, res: Res) => res.status(200).json({ ok: true }));
+// Liveness probe, plus the planner's SDK readiness so a broken deploy (native
+// sqlite3 missing → planner "unavailable") is observable rather than silent.
+// `ok` stays true for pure liveness; `sdk` is the deep signal monitors watch.
+app.get("/api/health", async (_req: Req, res: Res) => {
+  const sdk = await sdkHealth();
+  res.status(200).json({ ok: true, sdk: sdk.status, ...(sdk.error ? { sdkError: sdk.error } : {}) });
+});
 
 // Public, read-only data source for the dashboard. Same Linear-derived shape as
 // the internal fleet summary; unauthenticated so the page can poll it without
@@ -129,7 +136,10 @@ app.get("/api/board", async (req: Req, res: Res) => {
   try {
     const includeComplete = req.query.all === "1" || req.query.all === "true";
     const report = await boardCache.get(includeComplete);
-    res.status(200).set("Cache-Control", "no-store").json({ ok: true, ...report });
+    // Surface planner SDK readiness so the dashboard can warn when the deployed
+    // function can't load @cursor/sdk (the silent-fallback failure mode).
+    const sdk = await sdkHealth();
+    res.status(200).set("Cache-Control", "no-store").json({ ok: true, sdk: sdk.status, ...report });
 
     // Let the dashboard's own polling advance the pipeline: opportunistically
     // reconcile finished cloud runs (build/remediation completion) so the board
