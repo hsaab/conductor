@@ -45,6 +45,21 @@ function repoShortName(repo: string): string {
 }
 
 /**
+ * Condensed, single-line failure text for a spawn error.
+ *
+ * Works whether the error is a `CursorAgentError` (the SDK's typed startup
+ * failure) or a raw throw — notably an `@cursor/sdk` import failure when its
+ * native `sqlite3` binding is missing on the deploy target. Avoiding a direct
+ * `CursorAgentError` reference keeps this usable even when the SDK import itself
+ * is what failed.
+ */
+function formatAgentError(err: unknown): string {
+  const raw = err instanceof Error ? err.message || err.name : String(err);
+  const oneLine = raw.replace(/\s+/g, " ").trim();
+  return oneLine.length > 300 ? `${oneLine.slice(0, 297)}…` : oneLine;
+}
+
+/**
  * Spawn one cloud agent, kick off its run, and return immediately.
  *
  * Intentionally does NOT await `run.wait()`: cloud runs take many minutes,
@@ -54,12 +69,16 @@ function repoShortName(repo: string): string {
  * agent id so the reconciler can find the run again.
  */
 export async function spawnAgent(task: PlannedTask, issue: LinearIssuePayload): Promise<void> {
-  const { Agent, CursorAgentError } = await import("@cursor/sdk");
   const name = repoShortName(task.repo);
   console.log(
     `[${name}] Starting a Cursor cloud agent on github.com/${task.repo} (model: ${modelId}) for ${issue.identifier}`,
   );
   try {
+    // Import inside the try: @cursor/sdk loads native sqlite3 at import time, so
+    // a missing binding on the deploy target throws here. Keeping it inside the
+    // try turns that into a visible "failed to start" comment instead of an
+    // unhandled rejection that drops the agent with no trace on the ticket.
+    const { Agent } = await import("@cursor/sdk");
     await using agent = await Agent.create({
       apiKey: cursorKey(),
       model: { id: modelId },
@@ -78,7 +97,7 @@ export async function spawnAgent(task: PlannedTask, issue: LinearIssuePayload): 
       `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`${agent.agentId}\`\nRepo: \`${task.repo}\``,
     );
   } catch (err) {
-    const msg = err instanceof CursorAgentError ? `startup failed: ${err.message}` : String(err);
+    const msg = formatAgentError(err);
     console.error(`[${name}] Failed to start on ${task.repo}: ${msg}`);
     await postComment(issue.id, `${markers.bridge}\n**Cursor agent failed to start**\n\nRepo: \`${task.repo}\`\n\n${msg}`);
   }
@@ -119,10 +138,12 @@ This PR re-enters conductor's loop at review, closing the remediation circle. Op
  * on failure.
  */
 export async function spawnRemediationAgent(alert: RemediationAlert): Promise<string | null> {
-  const { Agent, CursorAgentError } = await import("@cursor/sdk");
   const repo = `${ghOwner}/${deployTargetRepo}`;
   console.log(`[remediation] Starting a Cursor cloud agent on github.com/${repo} for "${alert.title}"`);
   try {
+    // See spawnAgent: import inside the try so a missing native sqlite3 binding
+    // surfaces as a "failed to start" comment rather than an unhandled throw.
+    const { Agent } = await import("@cursor/sdk");
     await using agent = await Agent.create({
       apiKey: cursorKey(),
       model: { id: modelId },
@@ -142,7 +163,7 @@ export async function spawnRemediationAgent(alert: RemediationAlert): Promise<st
     }
     return agent.agentId;
   } catch (err) {
-    const msg = err instanceof CursorAgentError ? `startup failed: ${err.message}` : String(err);
+    const msg = formatAgentError(err);
     console.error(`[remediation] Failed to start on ${repo}: ${msg}`);
     if (alert.issue) {
       await postComment(alert.issue.id, `${markers.bridge}\n**Remediation agent failed to start**\n\n${msg}`);

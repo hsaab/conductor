@@ -131,6 +131,8 @@ request blocks on a multi-minute agent run.
 | `OBSERVE_WINDOW_MS` | Post-deploy monitoring window before observe closes cleanly (default: `120000`, 2 min) |
 | `BRIDGE_MODEL_ID` | Cloud model for spawned agents (default: `composer-2.5`) |
 | `PLANNER_MODEL_ID` | Model the planner agent uses (default: `composer-2.5`) |
+| `PLANNER_MAX_ATTEMPTS` | How many times the planner agent is tried before falling back, so a transient cloud-run error is retried instead of degrading the plan (default: `2`; `1` disables retries) |
+| `PLANNER_RETRY_DELAY_MS` | Backoff between planner attempts (default: `500`) |
 | `MAX_AGENTS` | Upper bound on agents per ticket (default: `6`) |
 | `BOARD_CACHE_MS` | TTL for the cached `/api/board` snapshot, so the dashboard's frequent polling collapses into at most one Linear read per window (default: `3000`, 3s) |
 | `BRIDGE_URL` | Deployed conductor base URL (for manual curls) |
@@ -250,3 +252,23 @@ vercel deploy --prod
 Make sure the Linear webhook URL points at your production domain, and that
 `LINEAR_API_KEY` / `LINEAR_WEBHOOK_SECRET` belong to the **same** workspace that
 owns the webhook.
+
+### Why `vercel.json` bundles `sqlite3` and raises `maxDuration`
+
+`@cursor/sdk` loads its native `sqlite3` binding **at import time**. Vercel's file
+tracer (`@vercel/nft`) statically analyses `import`/`require`, but the binding is
+loaded through `node-gyp`/`bindings` at runtime, so the compiled
+`node_sqlite3.node` is **not** traced into the deployed function — even though
+`pnpm install` builds it (and `postinstall` `verify-sdk` confirms it). The result:
+`import("@cursor/sdk")` throws *only on the deployed function*, the planner and
+every spawned agent silently degrade to "startup failed", and no fleet launches.
+The `builds[].config.includeFiles` glob force-includes the binary so the import
+works on the deployed function the same way it does locally.
+
+`maxDuration` is raised because the planner runs a real Cursor cloud agent
+(~50s) inside the webhook's `waitUntil`; the default 10–15s budget would kill the
+function mid-plan. `60` is valid on every plan; on Vercel Pro/Enterprise you can
+raise it (up to 300/900) for more cold-start headroom. Planner retries are
+bounded by `PLANNER_MAX_ATTEMPTS` (default `2`) and `PLANNER_RETRY_DELAY_MS`
+(default `500`) so a transient cloud-run error is retried without blowing that
+budget — set `PLANNER_MAX_ATTEMPTS=1` to disable retries on a tight budget.

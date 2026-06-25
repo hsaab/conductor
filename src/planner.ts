@@ -252,15 +252,49 @@ function fallbackFleetPlan(issue: LinearIssuePayload, fallbackReason: string): F
   return { tasks: plan, usedFallback: true, fallbackReason };
 }
 
-/** Reads the ticket via a Cursor cloud agent and returns one task per repo it chose. */
-export async function planFleet(issue: LinearIssuePayload): Promise<FleetPlan> {
-  console.log(`[planner] Reading ${issue.identifier} "${issue.title}" with a Cursor agent to decide which repos need work`);
-  const apiKey = cursorKey().trim();
-  if (!apiKey) {
-    console.error("[planner] Missing CURSOR_API_KEY; using fallback");
-    return fallbackFleetPlan(issue, "missing CURSOR_API_KEY");
-  }
+/** Condensed, single-line error text safe to surface in a Linear comment. */
+function errorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message || err.name : String(err);
+  const oneLine = raw.replace(/\s+/g, " ").trim();
+  return oneLine.length > 200 ? `${oneLine.slice(0, 197)}…` : oneLine;
+}
 
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * How many times to ask the planner agent before giving up to the fallback.
+ * A failed cloud run reports back fast (seconds), so one retry typically
+ * recovers a transient hiccup without threatening the function's time budget.
+ * Override with `PLANNER_MAX_ATTEMPTS` (Pro deploys with a higher `maxDuration`
+ * can afford more; keep it at 1 to disable retries on a tight budget).
+ */
+function plannerMaxAttempts(): number {
+  const n = Number(process.env.PLANNER_MAX_ATTEMPTS ?? 2);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 2;
+}
+
+/** Backoff between planner attempts. Override with `PLANNER_RETRY_DELAY_MS`. */
+function plannerRetryDelayMs(): number {
+  const n = Number(process.env.PLANNER_RETRY_DELAY_MS ?? 500);
+  return Number.isFinite(n) && n >= 0 ? n : 500;
+}
+
+/** Outcome of a single planner attempt: a usable task list, or why it failed. */
+export type PlannerAttempt =
+  | { ok: true; tasks: PlannedTask[] }
+  | { ok: false; reason: string; transient: boolean };
+
+/**
+ * One planner attempt: run the Cursor cloud agent and turn its reply into tasks.
+ *
+ * The dynamic `import("@cursor/sdk")` lives *inside* the try on purpose. The SDK
+ * loads its native `sqlite3` binding at import time; if that binding is missing
+ * on the deploy target the import throws, and catching it here surfaces the real
+ * error (rather than an opaque "planner unavailable"). `transient` marks failures
+ * worth retrying (a thrown error or a non-finished run) versus a clean run that
+ * simply produced no parseable plan, which a retry would not improve.
+ */
+async function runPlannerOnce(issue: LinearIssuePayload, apiKey: string): Promise<PlannerAttempt> {
   try {
     const { Agent } = await import("@cursor/sdk");
     const result = await Agent.prompt(buildPlannerPrompt(issue), {
@@ -276,18 +310,66 @@ export async function planFleet(issue: LinearIssuePayload): Promise<FleetPlan> {
       // Union in any repo the ticket explicitly names but the agent omitted, so
       // an explicitly multi-repo ticket never silently drops a repo to the LLM.
       const plan = withTicketRepos(parsePlanText(result.result), issue);
-      if (plan.length) {
-        console.log(`[planner] Plan: ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`);
-        return { tasks: plan, usedFallback: false };
-      }
-      console.log("[planner] Could not parse a plan from the agent reply, using fallback");
-      return fallbackFleetPlan(issue, "planner returned no parseable plan");
-    } else {
-      console.log(`[planner] Planner run did not finish (status: ${result.status}), using fallback`);
-      return fallbackFleetPlan(issue, `planner run ${result.status}`);
+      if (plan.length) return { ok: true, tasks: plan };
+      return { ok: false, reason: "planner returned no parseable plan", transient: false };
     }
+    return { ok: false, reason: `planner run ${result.status}`, transient: true };
   } catch (err) {
-    console.error("[planner] Planning failed, using fallback:", err);
-    return fallbackFleetPlan(issue, "planner startup failed");
+    return { ok: false, reason: `planner startup failed: ${errorMessage(err)}`, transient: true };
   }
+}
+
+/**
+ * Drives the planner with a bounded retry: returns the first successful plan,
+ * stops early on a non-transient failure (a clean run that just produced nothing
+ * parseable won't improve on retry), and otherwise falls back with the most
+ * recent failure reason. Attempt + delay are injected so the retry policy is
+ * unit-testable without spawning a real cloud agent.
+ */
+export async function planWithRetries(
+  issue: LinearIssuePayload,
+  attempt: () => Promise<PlannerAttempt>,
+  maxAttempts: number,
+  onRetryDelay: () => Promise<void>,
+): Promise<FleetPlan> {
+  let lastReason = "planner unavailable";
+  for (let i = 1; i <= maxAttempts; i++) {
+    const outcome = await attempt();
+    if (outcome.ok) {
+      console.log(
+        `[planner] Plan: ${outcome.tasks.length} agent(s) → ${outcome.tasks.map((t) => `${t.repo} (${t.kind})`).join(", ")}`,
+      );
+      return { tasks: outcome.tasks, usedFallback: false };
+    }
+    lastReason = outcome.reason;
+    const willRetry = outcome.transient && i < maxAttempts;
+    console.warn(
+      `[planner] attempt ${i}/${maxAttempts} did not yield a plan: ${outcome.reason}${willRetry ? " — retrying" : ""}`,
+    );
+    if (!outcome.transient) break;
+    if (willRetry) await onRetryDelay();
+  }
+  return fallbackFleetPlan(issue, lastReason);
+}
+
+/**
+ * Reads the ticket via a Cursor cloud agent and returns one task per repo it
+ * chose. Retries a transient failure a bounded number of times before falling
+ * back, so a single flaky cloud-run start no longer makes the planner
+ * "unavailable" for the whole ticket. The fallback reason carries the real
+ * underlying error so a persistent failure is diagnosable from the ticket.
+ */
+export async function planFleet(issue: LinearIssuePayload): Promise<FleetPlan> {
+  console.log(`[planner] Reading ${issue.identifier} "${issue.title}" with a Cursor agent to decide which repos need work`);
+  const apiKey = cursorKey().trim();
+  if (!apiKey) {
+    console.error("[planner] Missing CURSOR_API_KEY; using fallback");
+    return fallbackFleetPlan(issue, "missing CURSOR_API_KEY");
+  }
+  return planWithRetries(
+    issue,
+    () => runPlannerOnce(issue, apiKey),
+    plannerMaxAttempts(),
+    () => delay(plannerRetryDelayMs()),
+  );
 }

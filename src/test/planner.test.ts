@@ -7,10 +7,33 @@ import {
   parsePlanText,
   parseTicketRepos,
   planFleet,
+  planWithRetries,
   sanitizePlan,
   withTicketRepos,
+  type PlannerAttempt,
 } from "../planner.js";
 import type { LinearIssuePayload } from "../types.js";
+
+/** Test helper: an attempt fn that yields the queued outcomes in order, counting calls + delays. */
+function scriptedAttempts(outcomes: PlannerAttempt[]) {
+  const state = { calls: 0, delays: 0 };
+  const attempt = async (): Promise<PlannerAttempt> => {
+    const next = outcomes[state.calls] ?? outcomes[outcomes.length - 1];
+    state.calls += 1;
+    return next;
+  };
+  const onRetryDelay = async (): Promise<void> => {
+    state.delays += 1;
+  };
+  return { attempt, onRetryDelay, state };
+}
+
+const plannerIssue = {
+  identifier: "FE-7",
+  title: "Build AI advisor chat",
+  description: "",
+  labels: [{ name: "cursor-fleet" }],
+} as LinearIssuePayload;
 
 /**
  * FE-5's real Linear description, verbatim. The repos are markdown-bolded list
@@ -280,4 +303,62 @@ test("parsePlanText reads JSON wrapped in a fenced block and surrounding prose",
 test("parsePlanText returns empty on unparseable text", () => {
   assert.deepEqual(parsePlanText("no json here"), []);
   assert.deepEqual(parsePlanText(""), []);
+});
+
+test("planWithRetries returns the plan on first success without retrying or falling back", async () => {
+  const { attempt, onRetryDelay, state } = scriptedAttempts([
+    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }] },
+  ]);
+  const plan = await planWithRetries(plannerIssue, attempt, 3, onRetryDelay);
+  assert.equal(plan.usedFallback, false);
+  assert.deepEqual(plan.tasks.map((t) => t.repo), ["acme/web"]);
+  assert.equal(state.calls, 1);
+  assert.equal(state.delays, 0);
+});
+
+test("planWithRetries retries a transient failure, then succeeds without falling back", async () => {
+  // This is the core fix: one flaky cloud-run start must not make the planner
+  // "unavailable" — a retry recovers and the real plan is used.
+  const { attempt, onRetryDelay, state } = scriptedAttempts([
+    { ok: false, reason: "planner run error", transient: true },
+    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }] },
+  ]);
+  const plan = await planWithRetries(plannerIssue, attempt, 3, onRetryDelay);
+  assert.equal(plan.usedFallback, false);
+  assert.deepEqual(plan.tasks.map((t) => t.repo), ["acme/web"]);
+  assert.equal(state.calls, 2);
+  assert.equal(state.delays, 1);
+});
+
+test("planWithRetries does NOT retry a non-transient failure (clean run, no parseable plan)", async () => {
+  const { attempt, onRetryDelay, state } = scriptedAttempts([
+    { ok: false, reason: "planner returned no parseable plan", transient: false },
+    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }] },
+  ]);
+  const plan = await planWithRetries(plannerIssue, attempt, 3, onRetryDelay);
+  assert.equal(plan.usedFallback, true);
+  assert.equal(plan.fallbackReason, "planner returned no parseable plan");
+  assert.equal(state.calls, 1, "should stop after the first non-transient failure");
+  assert.equal(state.delays, 0);
+});
+
+test("planWithRetries exhausts attempts on a persistent transient failure and surfaces the real reason", async () => {
+  const { attempt, onRetryDelay, state } = scriptedAttempts([
+    { ok: false, reason: "planner startup failed: Could not locate the bindings file", transient: true },
+  ]);
+  const plan = await planWithRetries(plannerIssue, attempt, 2, onRetryDelay);
+  assert.equal(plan.usedFallback, true);
+  assert.equal(plan.fallbackReason, "planner startup failed: Could not locate the bindings file");
+  assert.equal(state.calls, 2, "should try exactly maxAttempts times");
+  assert.equal(state.delays, 1, "one delay between the two attempts");
+});
+
+test("planWithRetries respects maxAttempts=1 (retries disabled)", async () => {
+  const { attempt, onRetryDelay, state } = scriptedAttempts([
+    { ok: false, reason: "planner run error", transient: true },
+  ]);
+  const plan = await planWithRetries(plannerIssue, attempt, 1, onRetryDelay);
+  assert.equal(plan.usedFallback, true);
+  assert.equal(state.calls, 1);
+  assert.equal(state.delays, 0);
 });
