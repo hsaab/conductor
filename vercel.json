@@ -5,8 +5,7 @@
       "src": "src/index.ts",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": "node_modules/.pnpm/**/sqlite3/**",
-        "maxDuration": 60
+        "includeFiles": "node_modules/.pnpm/sqlite3@*/node_modules/sqlite3/**"
       }
     }
   ],
