@@ -253,22 +253,40 @@ Make sure the Linear webhook URL points at your production domain, and that
 `LINEAR_API_KEY` / `LINEAR_WEBHOOK_SECRET` belong to the **same** workspace that
 owns the webhook.
 
-### Why `vercel.json` bundles `sqlite3` and raises `maxDuration`
+### Keeping the planner from silently breaking (sqlite3 / `@cursor/sdk`)
 
-`@cursor/sdk` loads its native `sqlite3` binding **at import time**. Vercel's file
-tracer (`@vercel/nft`) statically analyses `import`/`require`, but the binding is
-loaded through `node-gyp`/`bindings` at runtime, so the compiled
-`node_sqlite3.node` is **not** traced into the deployed function — even though
-`pnpm install` builds it (and `postinstall` `verify-sdk` confirms it). The result:
-`import("@cursor/sdk")` throws *only on the deployed function*, the planner and
-every spawned agent silently degrade to "startup failed", and no fleet launches.
-The `builds[].config.includeFiles` glob force-includes the binary so the import
-works on the deployed function the same way it does locally.
+`@cursor/sdk` loads its native `sqlite3` binding **at import time**, which has
+broken the planner more than once. Two things must hold on the deployed function,
+and both used to fail silently:
 
-`maxDuration` is raised because the planner runs a real Cursor cloud agent
-(~50s) inside the webhook's `waitUntil`; the default 10–15s budget would kill the
-function mid-plan. `60` is valid on every plan; on Vercel Pro/Enterprise you can
-raise it (up to 300/900) for more cold-start headroom. Planner retries are
-bounded by `PLANNER_MAX_ATTEMPTS` (default `2`) and `PLANNER_RETRY_DELAY_MS`
-(default `500`) so a transient cloud-run error is retried without blowing that
-budget — set `PLANNER_MAX_ATTEMPTS=1` to disable retries on a tight budget.
+1. **sqlite3 must build during `pnpm install`.** Vercel's pnpm did not honor the
+   build-script allowlist in `pnpm-workspace.yaml`, so it skipped sqlite3's build
+   ("Ignored build scripts: … sqlite3") and `import("@cursor/sdk")` threw. The
+   `postinstall` guard (`scripts/verify-sdk.mjs`) now **self-heals**: if the SDK
+   can't import, it builds sqlite3 directly via `npm run install` (npm has no such
+   gate; `pnpm rebuild` honors the same gate and no-ops) and re-checks. A healthy
+   install is a fast no-op.
+2. **The built binary must be bundled into the function.** Vercel's file tracer
+   misses the `bindings`-loaded `node_sqlite3.node`, so `vercel.json`
+   `builds[].config.includeFiles` force-includes it.
+
+The planner also retries a transient cloud-run error before falling back, bounded
+by `PLANNER_MAX_ATTEMPTS` (default `2`) / `PLANNER_RETRY_DELAY_MS` (default `500`).
+
+#### Guardrails so it can't regress unnoticed
+
+- **CI `deploy guard`** (`.github/workflows/ci.yml`) reproduces a host that skips
+  sqlite3's build (`pnpm install --ignore-scripts`) and fails unless `verify-sdk`
+  self-heals and `@cursor/sdk` imports — so a change that would ship a broken
+  planner turns the PR red **before** merge (alongside a `build + test` job).
+- **Failed-deploy alert** (`.github/workflows/deploy-failed.yml`) opens a tracking
+  issue when a Vercel **prod** deploy fails, so a green merge with a red deploy
+  can't slip by unnoticed (the trap that left the site on a stale build).
+- **Runtime signal**: `GET /api/health` returns `sdk: "ok" | "unavailable"` and
+  the dashboard raises a banner when the deployed function can't load the SDK — so
+  breakage is visible at a glance, not hours into a demo as fallback plans.
+
+> `maxDuration` is intentionally not set in `vercel.json` — it tripped the deploy
+> build, and the planner run completes within the function's existing budget. If a
+> run is ever truncated, add it via the supported `@vercel/node` config and
+> re-verify with the CI deploy guard.

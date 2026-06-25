@@ -46,10 +46,15 @@ Secrets live only in `.env` (gitignored). This doc references them as env vars.
 ### 1.1 Conductor is live
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" "$BRIDGE_URL/api/health"      # expect 200
-curl -s "$BRIDGE_URL/api/health"                                       # expect {"ok":true}
+curl -s "$BRIDGE_URL/api/health" | jq '{ok, sdk}'                      # expect {"ok":true,"sdk":"ok"}
 curl -s -o /dev/null -w "%{http_code}\n" "$BRIDGE_URL/"                # expect 200 (dashboard HTML)
 curl -s -o /dev/null -w "%{http_code}\n" "$BRIDGE_URL/api/board"       # expect 200
 ```
+
+`sdk:"ok"` confirms the deployed function can load `@cursor/sdk` — the planner is
+available, not in the silent fallback state. If it reads `"unavailable"`, the
+deploy is broken and the planner would fall back; see the README's "Keeping the
+planner from silently breaking" section before demoing.
 
 ### 1.2 Compound is live and FAST (baseline, pre-regression)
 ```bash
