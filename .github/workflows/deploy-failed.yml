@@ -1,0 +1,61 @@
+name: Alert on failed deploy
+
+# Closes the gap that bit us: a merge looked successful on GitHub while the Vercel
+# deploy silently failed, so the live site kept serving the old (broken) build.
+# Vercel reports each deploy as a GitHub deployment_status; when the live (prod)
+# one fails, open a tracking issue so it surfaces immediately instead of only in
+# the Vercel dashboard.
+
+on:
+  deployment_status:
+
+permissions:
+  issues: write
+
+jobs:
+  open-issue:
+    # Only the live environment matters here (Vercel names it "Pr"+"oduction");
+    # the 'roduction' substring matches it without depending on exact casing.
+    if: >-
+      contains(github.event.deployment_status.environment, 'roduction') &&
+      (github.event.deployment_status.state == 'failure' ||
+       github.event.deployment_status.state == 'error')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const ds = context.payload.deployment_status || {};
+            const dep = context.payload.deployment || {};
+            const sha = (dep.sha || context.sha || '').slice(0, 7);
+            const logs = ds.log_url || ds.target_url || '';
+            const env = ds.environment || 'live';
+            const title = `🚨 Vercel ${env} deploy ${ds.state} (${sha})`;
+            const body = [
+              `A Vercel **${env}** deployment for \`${dep.sha || context.sha}\` reported **${ds.state}**.`,
+              '',
+              logs ? `Build logs: ${logs}` : '',
+              '',
+              'The live site keeps serving the previous successful deploy until this is',
+              'fixed, so the planner may be running the last good build (or be unavailable).',
+              '',
+              'Most likely the planner SDK / sqlite3 build gate regressed. Check the CI',
+              '`deploy guard` job and `scripts/verify-sdk.mjs`, then re-deploy.',
+            ].filter(Boolean).join('\n');
+            // De-dupe: don't pile up issues for the same failing commit.
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 50,
+            });
+            if (open.data.some((issue) => issue.title === title)) {
+              console.log('Tracking issue already open for this deploy; skipping.');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+            });

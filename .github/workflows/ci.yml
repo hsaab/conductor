@@ -1,0 +1,60 @@
+name: CI
+
+# Runs on every PR and on pushes to master. The deploy-guard job is the safety
+# net for the recurring "planner unavailable" outage: it reproduces a host whose
+# pnpm skips sqlite3's native build (as Vercel's does) and fails the check unless
+# verify-sdk self-heals and @cursor/sdk imports afterwards. A red check here means
+# the deploy would ship a broken planner — so it blocks the merge instead.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build-test:
+    name: build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+  deploy-guard:
+    name: deploy guard (sqlite3 / planner SDK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # Simulate the deploy host: install deps but DO NOT run build scripts, so
+      # sqlite3's native binding is left unbuilt — exactly the state that broke the
+      # live deploy. (Vercel's pnpm gates the build script; --ignore-scripts is the
+      # version-agnostic way to reproduce it.)
+      - name: Install with build scripts gated
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Confirm the gate is active (sqlite3 unbuilt)
+        run: |
+          if ls node_modules/.pnpm/sqlite3@*/node_modules/sqlite3/build/Release/*.node >/dev/null 2>&1; then
+            echo "::error::sqlite3 was built despite --ignore-scripts; this guard can no longer detect the regression"
+            exit 1
+          fi
+          echo "OK: sqlite3 is unbuilt, the gate is reproduced"
+      # The guard must recover: verify-sdk self-heals (builds sqlite3) and proves
+      # @cursor/sdk imports. If this exits non-zero, the planner would be
+      # "unavailable" once deployed — fail the check so it never merges.
+      - name: verify-sdk must self-heal so @cursor/sdk imports
+        run: node scripts/verify-sdk.mjs
