@@ -3,7 +3,16 @@
  * blocking on completion), and reconciling finished runs back into Linear.
  */
 import { markers, observeWindowMs, triggerLabel, triggerState } from "./config.js";
-import { checkAgentRun, isRunReportable, spawnAgent, type AgentRunStatus } from "./agents.js";
+import {
+  checkAgentRun,
+  isRunReportable,
+  parseVerifyVerdict,
+  readAgentRunResult,
+  spawnAgent,
+  spawnRemediationAgent,
+  spawnVerifyAgent,
+  type AgentRunStatus,
+} from "./agents.js";
 import { parseEvents } from "./events.js";
 import { allPullRequestsMerged } from "./github.js";
 import {
@@ -20,6 +29,10 @@ import {
   parseRemediationDoneIds,
   parseRemediationResults,
   parseSpawnedAgents,
+  parseTestPlan,
+  parseVerifyAgents,
+  hasVerifyFail,
+  hasVerifyPass,
   postComment,
   removeIssueReaction,
 } from "./linear.js";
@@ -32,6 +45,7 @@ import type {
   LinearIssuePayload,
   SpawnedAgent,
   StageState,
+  TestCase,
   TriggerResult,
 } from "./types.js";
 
@@ -49,6 +63,21 @@ function repoShortName(repo: string): string {
 
 function planTaskList(tasks: PlannedTask[]): string {
   return tasks.map((task) => `- \`${task.repo}\` (${task.kind})`).join("\n");
+}
+
+/** Human-readable + machine-parseable test plan comment for SQA and the verify agent. */
+function formatTestPlanComment(cases: TestCase[]): string {
+  const numbered = cases.map((c, i) => `${i + 1}. **${c.title}**\n   ${c.steps}`).join("\n\n");
+  const json = JSON.stringify({ cases }, null, 2);
+  return `${markers.testPlan}
+${markers.bridge}
+**📋 Test plan** (top ${cases.length} critical checks for SQA)
+
+${numbered}
+
+\`\`\`json
+${json}
+\`\`\``;
 }
 
 function fallbackDetail(reason: string | undefined): string {
@@ -94,7 +123,7 @@ A Cursor planner agent is reading the ticket to decide which repos need work.`,
     );
     console.log(`[fleet] Reacted 🚀 on ${issue.identifier}; planner agent is reading the ticket`);
 
-    const { tasks: plan, usedFallback, fallbackReason } = await planFleet(issue);
+    const { tasks: plan, testPlan, usedFallback, fallbackReason } = await planFleet(issue);
 
     const planHeadline = usedFallback
       ? `⚠️ Planner fallback${fallbackDetail(fallbackReason)} — defaulting to ${plan.length} agent(s)`
@@ -107,6 +136,16 @@ A Cursor planner agent is reading the ticket to decide which repos need work.`,
 Repos:
 ${planTaskList(plan)}`,
     );
+
+    if (testPlan.length > 0) {
+      await postComment(issue.id, formatTestPlanComment(testPlan));
+      await postSlack(
+        statusBlocks(`📋 ${issue.identifier} — test plan ready for SQA`, [
+          `${issue.title}`,
+          `${testPlan.length} critical check(s) posted to Linear for review.`,
+        ]),
+      );
+    }
 
     console.log(
       `[fleet] Launching ${plan.length} agent(s) for ${issue.identifier}: ${plan.map((t) => t.repo).join(", ")}`,
@@ -150,24 +189,18 @@ function latestBridgeCommentAt(issue: LinearIssuePayload): string | undefined {
  * Derives each pipeline stage's status purely from the issue's comment markers,
  * so the dashboard stays consistent with the rest of conductor's state store.
  *
- * The marker thread directly records plan/build/merge/deploy/observe/remediate;
- * review is inferred from its neighbors (a PR exists once the build is done and
- * closes once the PR merge is observed).
+ * Review combines Bugbot review + human merge (done when PRs merge). Verify
+ * replaces the passive observe window with an active test-plan agent run.
  */
 function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Record<string, StageState> {
   const started = hasComment(issue, markers.fleetStarted);
   const spawned = buildAgents.length > 0;
   const allDone = spawned && buildAgents.every((agent) => agent.done);
-  // Build fails only when an agent never launched. A finished run's terminal
-  // status ("cancelled"/"error") is not a failure signal — it can still have
-  // opened the PR that is the build's deliverable (see hasStartupFailure).
   const startupFailed = hasStartupFailure(issue);
   const deployed = hasComment(issue, markers.deployed);
-  // Review/merge track the real PR merge (the reconciler writes `merged` after
-  // checking GitHub). A successful deploy implies the merge already happened, so
-  // `deployed` is a fallback signal when no GitHub token is configured.
   const merged = hasComment(issue, markers.merged) || deployed;
-  const observeComplete = hasComment(issue, markers.observeComplete);
+  const verifyPass = hasVerifyPass(issue);
+  const verifyFail = hasVerifyFail(issue);
   const remediated = hasComment(issue, markers.remediated);
   const remediationDone = hasRemediationDone(issue);
 
@@ -175,26 +208,33 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
     plan: !started ? "pending" : spawned ? "done" : "running",
     build: startupFailed ? "failed" : !spawned ? "pending" : allDone ? "done" : "running",
     review: !allDone ? "pending" : merged ? "done" : "running",
-    merge: merged ? "done" : allDone ? "running" : "pending",
-    // Deploy waits on the Vercel webhook; it reads as running once merged so the
-    // gap between merge and the deploy.succeeded webhook is visible on the board.
     deploy: deployed ? "done" : merged ? "running" : "pending",
-    // Observe runs for a post-deploy window; an alert ends it early via remediated.
-    observe: !deployed ? "pending" : observeComplete || remediated ? "done" : "running",
+    verify: !deployed
+      ? "pending"
+      : verifyPass
+        ? "done"
+        : verifyFail
+          ? "failed"
+          : remediated
+            ? "done"
+            : "running",
     remediate: remediationDone ? "done" : remediated ? "running" : "pending",
   };
 }
 
 /**
- * True when the post-deploy observe window has elapsed. Uses the `verified`
- * comment timestamp (initial health check) when present, otherwise `deployed`.
+ * True when the post-deploy verify window has elapsed. Uses the verify-agent
+ * spawn timestamp when present, otherwise the deployed marker.
  */
-export function observeWindowElapsed(issue: LinearIssuePayload, nowMs: number, windowMs: number): boolean {
-  const startedAt =
-    commentCreatedAt(issue, markers.verified) ?? commentCreatedAt(issue, markers.deployed);
+export function verifyWindowElapsed(issue: LinearIssuePayload, nowMs: number, windowMs: number): boolean {
+  const verifyStarted = issue.comments?.find((c) => c.body?.includes("conductor:verify-agent"))?.createdAt;
+  const startedAt = verifyStarted ?? commentCreatedAt(issue, markers.deployed);
   if (!startedAt) return false;
   return nowMs - Date.parse(startedAt) >= windowMs;
 }
+
+/** @deprecated Use {@link verifyWindowElapsed}. Kept for older tests/docs during transition. */
+export const observeWindowElapsed = verifyWindowElapsed;
 
 /**
  * Builds the read-only summary for one launched fleet from its Linear comments.
@@ -219,7 +259,14 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
     prUrl: remResults.get(agent.agentId)?.prUrl,
   }));
 
-  const agents = [...buildAgents, ...remediationAgents];
+  const verifyDone = hasVerifyPass(issue) || hasVerifyFail(issue) || hasComment(issue, markers.remediated);
+  const verifyAgents: JobAgent[] = parseVerifyAgents(issue).map((agent) => ({
+    ...agent,
+    role: "verify",
+    done: verifyDone,
+  }));
+
+  const agents = [...buildAgents, ...verifyAgents, ...remediationAgents];
   const startedAt = commentCreatedAt(issue, markers.fleetStarted);
   const completedAt = commentCreatedAt(issue, markers.fleetComplete);
   const status: JobSummary["status"] = completedAt ? "complete" : "in-progress";
@@ -255,13 +302,8 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
  */
 export function jobNeedsReconcile(job: JobSummary): boolean {
   if (job.agentsPending > 0) return true;
-  const { build, merge, observe, remediate } = job.stages;
-  return (
-    build === "running" ||
-    merge === "running" ||
-    observe === "running" ||
-    remediate === "running"
-  );
+  const { build, review, verify, remediate } = job.stages;
+  return build === "running" || review === "running" || verify === "running" || remediate === "running";
 }
 
 export async function listJobs(
@@ -472,8 +514,8 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
     // Separate track: report any finished remediation agents (hotfix PRs).
     summary.agentsCompleted += await reconcileRemediation(issue);
 
-    // Close the observe window when monitoring elapsed with no alerts.
-    await reconcileObserve(issue);
+    // Close the verify window when monitoring elapsed with no alerts or verdict.
+    await reconcileVerify(issue);
   }
   return summary;
 }
@@ -518,29 +560,70 @@ async function reconcileMerge(
 }
 
 /**
- * Ends the observe stage when the post-deploy monitoring window passes without
- * a Datadog alert. Happy-path fleets (e.g. FE-7) finish here; remediation is
- * never dispatched.
+ * Ends the verify stage when the verify agent reports a verdict, or when the
+ * post-deploy window passes with no explicit failure (happy-path fallback).
  */
-async function reconcileObserve(issue: LinearIssuePayload): Promise<void> {
+async function reconcileVerify(issue: LinearIssuePayload): Promise<void> {
   if (!hasComment(issue, markers.deployed)) return;
-  if (hasComment(issue, markers.observeComplete)) return;
-  if (hasComment(issue, markers.remediated)) return;
-  if (!observeWindowElapsed(issue, Date.now(), observeWindowMs())) return;
+  if (hasVerifyPass(issue) || hasVerifyFail(issue)) return;
 
-  const windowMin = Math.round(observeWindowMs() / 60_000);
-  await postComment(
-    issue.id,
-    `${markers.observeComplete}\n**✅ Observe window passed** — no production alerts in the last ${windowMin} min.`,
-  );
-  console.log(`[observe] ${issue.identifier} monitoring window elapsed with no alerts`);
-  await postSlack(
-    statusBlocks(`✅ ${issue.identifier} — monitoring passed`, [
-      `${issue.title}`,
-      `No production alerts during the ${windowMin}-minute observe window.`,
-      `Remediation was not needed.`,
-    ]),
-  );
+  const verifyAgents = parseVerifyAgents(issue);
+  for (const agent of verifyAgents) {
+    const result = await readAgentRunResult(agent.agentId);
+    if (!result) continue;
+
+    const verdict = result.resultText ? parseVerifyVerdict(result.resultText) : null;
+    if (verdict === "pass" || (result.terminal && verdict !== "fail")) {
+      await postComment(
+        issue.id,
+        `${markers.verifyPass}
+**✅ Verify passed** — critical acceptance checks passed on production.
+
+${result.resultText?.trim() ?? "Verify agent finished without reporting failures."}`,
+      );
+      console.log(`[verify] ${issue.identifier} verify passed`);
+      await postSlack(
+        statusBlocks(`✅ ${issue.identifier} — verify passed`, [
+          issue.title,
+          "All critical test-plan checks passed on the deployed site.",
+        ]),
+      );
+      return;
+    }
+
+    if (verdict === "fail") {
+      const summary = result.resultText?.trim() ?? "Verify agent reported failed checks.";
+      await postComment(issue.id, `${markers.verifyFail}\n**❌ Verify failed**\n\n${summary}`);
+      console.log(`[verify] ${issue.identifier} verify failed — dispatching remediation`);
+      await postSlack(
+        statusBlocks(`❌ ${issue.identifier} — verify failed`, [issue.title, summary, "Dispatching remediation agent…"]),
+      );
+      if (!hasComment(issue, markers.remediated)) {
+        await spawnRemediationAgent({
+          title: "Verify agent — acceptance checks failed",
+          body: summary,
+          issue,
+        });
+      }
+      return;
+    }
+  }
+
+  if (verifyAgents.length > 0 && verifyWindowElapsed(issue, Date.now(), observeWindowMs())) {
+    const windowMin = Math.round(observeWindowMs() / 60_000);
+    await postComment(
+      issue.id,
+      `${markers.verifyPass}
+**✅ Verify window passed** — no failures reported in the last ${windowMin} min.`,
+    );
+    console.log(`[verify] ${issue.identifier} verify window elapsed with no failure verdict`);
+    await postSlack(
+      statusBlocks(`✅ ${issue.identifier} — verify window passed`, [
+        issue.title,
+        `No verify failures during the ${windowMin}-minute window.`,
+      ]),
+    );
+  }
 }
 
 /** Minimum gap between opportunistic reconciles kicked off by dashboard polls. */

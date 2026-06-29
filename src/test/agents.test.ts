@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { isRunReportable, type AgentRunStatus } from "../agents.js";
+import { isRunReportable, parseVerifyVerdict, type AgentRunStatus } from "../agents.js";
 
 test("isRunReportable reports a published PR even while the run is still running", () => {
   // The case that left the dashboard's build stage stuck on "running": the cloud
@@ -24,4 +24,10 @@ test("isRunReportable reports a terminal run that produced no PR", () => {
 test("isRunReportable does NOT report a still-running run with no PR yet", () => {
   // No PR and not terminal means the build is genuinely still in progress.
   assert.equal(isRunReportable({ terminal: false, status: "running" }), false);
+});
+
+test("parseVerifyVerdict reads PASS and FAIL from the machine-readable line", () => {
+  assert.equal(parseVerifyVerdict("All good.\nVERIFY_RESULT: PASS — checks passed"), "pass");
+  assert.equal(parseVerifyVerdict("VERIFY_RESULT: FAIL — chat widget missing"), "fail");
+  assert.equal(parseVerifyVerdict("no verdict here"), null);
 });

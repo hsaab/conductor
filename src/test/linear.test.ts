@@ -15,6 +15,7 @@ import {
   issueRefFromBody,
   parseDoneAgentIds,
   parseSpawnedAgents,
+  parseTestPlan,
 } from "../linear.js";
 import { markers } from "../config.js";
 import type { LinearIssuePayload } from "../types.js";
@@ -100,6 +101,17 @@ test("issueRefFromBody returns undefined for missing/blank/non-string refs", () 
   assert.equal(issueRefFromBody({ issueId: 123 }), undefined);
   assert.equal(issueRefFromBody(undefined), undefined);
   assert.equal(issueRefFromBody(null), undefined);
+});
+
+test("parseTestPlan reads cases from the fenced JSON block in a test-plan comment", () => {
+  const body = `${markers.testPlan}
+**Test plan**
+
+\`\`\`json
+{"cases":[{"title":"Chat opens","steps":"Click advisor widget"}]}
+\`\`\``;
+  const cases = parseTestPlan(issueWith([body]));
+  assert.deepEqual(cases, [{ title: "Chat opens", steps: "Click advisor widget" }]);
 });
 
 test("bridgeReactionId is deterministic, unique per issue, and UUID-shaped", () => {

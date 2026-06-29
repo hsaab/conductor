@@ -1,5 +1,11 @@
 /** Shared domain types for the Linear ↔ Cursor bridge. */
 
+/** One critical acceptance check in the AI-generated test plan (top 3-5 per ticket). */
+export interface TestCase {
+  title: string;
+  steps: string;
+}
+
 /** Normalized Linear issue shape used throughout the bridge. */
 export interface LinearIssuePayload {
   id: string;
@@ -40,7 +46,7 @@ export interface JobAgent extends SpawnedAgent {
   /** PR URL parsed from the agent's completion comment, when present. */
   prUrl?: string;
   /** Which pipeline phase spawned this agent. */
-  role: "build" | "remediation";
+  role: "build" | "remediation" | "verify";
 }
 
 /** Status of a single pipeline stage, used by the mission-control dashboard. */

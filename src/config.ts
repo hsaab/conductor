@@ -116,9 +116,17 @@ export const markers = {
   merged: "<!-- conductor:merged -->",
   /** Posted when a deploy of the target repo succeeds (observability stage begins). */
   deployed: "<!-- conductor:deployed -->",
-  /** Posted when the deploy is recorded and the observe window opens (scanning begins). */
+  /** Posted when a test plan is generated during planning (SQA review artifact). */
+  testPlan: "<!-- conductor:test-plan -->",
+  /** Marks a dispatched verify cloud agent (distinct from build/remediation agents). */
+  verifySpawned: (agentId: string): string => `<!-- conductor:verify-agent id=${agentId} -->`,
+  /** Posted when the verify agent reports all critical checks passed. */
+  verifyPass: "<!-- conductor:verify-pass -->",
+  /** Posted when the verify agent reports one or more checks failed. */
+  verifyFail: "<!-- conductor:verify-fail -->",
+  /** @deprecated Legacy observe marker; kept so reset cleans older deploy comments. */
   verified: "<!-- conductor:verified -->",
-  /** Posted when the observe window elapsed with no alerts — remediation not needed. */
+  /** @deprecated Legacy observe marker; kept so reset cleans older deploy comments. */
   observeComplete: "<!-- conductor:observe-complete -->",
   /** Posted when a stage result has been announced to Slack. */
   announced: "<!-- conductor:announced -->",
@@ -138,9 +146,8 @@ export const pipelineStages = [
   "plan",
   "build",
   "review",
-  "merge",
   "deploy",
-  "observe",
+  "verify",
   "remediate",
 ] as const;
 

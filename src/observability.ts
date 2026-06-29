@@ -13,9 +13,10 @@
  */
 import { deployTargetRepo, githubToken, markers, observeWindowMs, productionDeployHostname } from "./config.js";
 import { checkServiceHealth, datadogServiceUrl, type ServiceHealth } from "./datadog.js";
+import { spawnVerifyAgent } from "./agents.js";
 import { findActiveFleet, summarizeJob } from "./fleet.js";
 import { allPullRequestsMerged } from "./github.js";
-import { hasComment, postComment } from "./linear.js";
+import { hasComment, parseTestPlan, parseVerifyAgents, postComment } from "./linear.js";
 import { postSlack, statusBlocks } from "./slack.js";
 import type { LinearIssuePayload } from "./types.js";
 
@@ -131,14 +132,16 @@ export function buildDeployAnnouncement(
       headline: matchedTicket
         ? `⚠️ ${project} shipped with errors already in production`
         : `⚠️ ${project} production deploy — ${count} already in logs`,
-      scanLine: `Scanning: ⚠️ ${count} already in production (last 10 min)`,
+      scanLine: matchedTicket
+        ? `Verify: 🔍 running test plan (${count} already in logs, ${windowMin} min window)`
+        : `Note: no active fleet ticket matched this deploy`,
       observeNote: `⚠️ ${count} already present. `,
     };
   }
   return {
     headline: matchedTicket ? `🚀 ${project} shipped to production` : `📦 ${project} ${shipped}`,
     scanLine: matchedTicket
-      ? `Scanning: 🔭 watching production logs and errors for ${windowMin} min`
+      ? `Verify: 🔍 running test plan against production (${windowMin} min window)`
       : `Note: no active fleet ticket matched this deploy`,
     observeNote: "",
   };
@@ -222,11 +225,13 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
 
   await postSlack(statusBlocks(headline, lines));
 
-  if (issue && !hasComment(issue, markers.verified)) {
-    await postComment(
-      issue.id,
-      `${markers.verified}\n${markers.announced}\n**🔭 Observability:** ${observeNote}scanning production logs and errors for ${windowMin} min before closing the observe window.`,
-    );
+  if (issue && parseVerifyAgents(issue).length === 0) {
+    const prodHost = productionDeployHostname();
+    const prodUrl = dep.url ?? (prodHost ? `https://${prodHost}` : "");
+    const testPlan = parseTestPlan(issue);
+    if (prodUrl) {
+      await spawnVerifyAgent({ issue, prodUrl, testPlan });
+    }
   }
 
   return { handled: true };

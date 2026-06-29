@@ -3,12 +3,14 @@ import { test } from "node:test";
 
 import {
   fallbackPlan,
+  fallbackTestPlan,
   normalizeKind,
   parsePlanText,
   parseTicketRepos,
   planFleet,
   planWithRetries,
   sanitizePlan,
+  sanitizeTestPlan,
   withTicketRepos,
   type PlannerAttempt,
 } from "../planner.js";
@@ -286,28 +288,57 @@ test("normalizeKind accepts known kinds and falls back to feature", () => {
 });
 
 test("parsePlanText reads a bare JSON object from the agent reply", () => {
-  const text = '{"tasks":[{"repo":"acme/web","kind":"bug","instructions":"Update footer"}]}';
-  assert.deepEqual(parsePlanText(text), [{ repo: "acme/web", instructions: "Update footer", kind: "bug" }]);
+  const text =
+    '{"tasks":[{"repo":"acme/web","kind":"bug","instructions":"Update footer"}],"testPlan":[{"title":"Footer loads","steps":"Open footer"}]}';
+  assert.deepEqual(parsePlanText(text).tasks, [
+    { repo: "acme/web", instructions: "Update footer", kind: "bug" },
+  ]);
+  assert.deepEqual(parsePlanText(text).testPlan, [{ title: "Footer loads", steps: "Open footer" }]);
 });
 
 test("parsePlanText defaults kind to feature when omitted", () => {
   const text = '{"tasks":[{"repo":"compound","instructions":"Add middleware"}]}';
-  assert.deepEqual(parsePlanText(text), [{ repo: "compound", instructions: "Add middleware", kind: "feature" }]);
+  assert.deepEqual(parsePlanText(text).tasks, [
+    { repo: "compound", instructions: "Add middleware", kind: "feature" },
+  ]);
 });
 
 test("parsePlanText reads JSON wrapped in a fenced block and surrounding prose", () => {
-  const text = 'Here is the plan:\n```json\n{"tasks":[{"repo":"compound","kind":"test","instructions":"Add middleware"}]}\n```\nDone.';
-  assert.deepEqual(parsePlanText(text), [{ repo: "compound", instructions: "Add middleware", kind: "test" }]);
+  const text =
+    'Here is the plan:\n```json\n{"tasks":[{"repo":"compound","kind":"test","instructions":"Add middleware"}]}\n```\nDone.';
+  assert.deepEqual(parsePlanText(text).tasks, [
+    { repo: "compound", instructions: "Add middleware", kind: "test" },
+  ]);
 });
 
 test("parsePlanText returns empty on unparseable text", () => {
-  assert.deepEqual(parsePlanText("no json here"), []);
-  assert.deepEqual(parsePlanText(""), []);
+  assert.deepEqual(parsePlanText("no json here"), { tasks: [], testPlan: [] });
+  assert.deepEqual(parsePlanText(""), { tasks: [], testPlan: [] });
+});
+
+test("sanitizeTestPlan caps at five cases and drops empties", () => {
+  const cases = sanitizeTestPlan([
+    { title: "a", steps: "1" },
+    { title: "b", steps: "2" },
+    { title: "c", steps: "3" },
+    { title: "d", steps: "4" },
+    { title: "e", steps: "5" },
+    { title: "f", steps: "6" },
+    { title: "", steps: "skip" },
+  ]);
+  assert.equal(cases.length, 5);
+  assert.equal(cases[4].title, "e");
+});
+
+test("fallbackTestPlan extracts acceptance criteria bullets", () => {
+  const cases = fallbackTestPlan(fe5Issue);
+  assert.ok(cases.length >= 1);
+  assert.match(cases[0].steps, /X-Request-ID/i);
 });
 
 test("planWithRetries returns the plan on first success without retrying or falling back", async () => {
   const { attempt, onRetryDelay, state } = scriptedAttempts([
-    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }] },
+    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }], testPlan: [] },
   ]);
   const plan = await planWithRetries(plannerIssue, attempt, 3, onRetryDelay);
   assert.equal(plan.usedFallback, false);
@@ -321,7 +352,7 @@ test("planWithRetries retries a transient failure, then succeeds without falling
   // "unavailable" — a retry recovers and the real plan is used.
   const { attempt, onRetryDelay, state } = scriptedAttempts([
     { ok: false, reason: "planner run error", transient: true },
-    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }] },
+    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }], testPlan: [] },
   ]);
   const plan = await planWithRetries(plannerIssue, attempt, 3, onRetryDelay);
   assert.equal(plan.usedFallback, false);
@@ -333,7 +364,7 @@ test("planWithRetries retries a transient failure, then succeeds without falling
 test("planWithRetries does NOT retry a non-transient failure (clean run, no parseable plan)", async () => {
   const { attempt, onRetryDelay, state } = scriptedAttempts([
     { ok: false, reason: "planner returned no parseable plan", transient: false },
-    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }] },
+    { ok: true, tasks: [{ repo: "acme/web", instructions: "do it", kind: "feature" }], testPlan: [] },
   ]);
   const plan = await planWithRetries(plannerIssue, attempt, 3, onRetryDelay);
   assert.equal(plan.usedFallback, true);

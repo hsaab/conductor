@@ -1,7 +1,7 @@
 # Conductor — Demo Flow Spec
 
 Canonical, **agent-checkable** description of the 2K demo. The goal: a closed-loop
-software factory where a Linear ticket goes in and a reviewed, deployed, observed,
+software factory where a Linear ticket goes in and a reviewed, deployed, verified,
 and (when needed) self-remediated change comes out — visible live on the dashboard
 and in Slack.
 
@@ -120,28 +120,27 @@ poll `GET $BRIDGE_URL/api/board` and read `jobs[].stages`.
 
 | Stage | Becomes `done` when… | Marker(s) | Driven by |
 |---|---|---|---|
-| plan | a fleet was planned + agents spawned | `fleet-started`, `agent spawned` | `/webhook/linear` → planner |
+| plan | a fleet was planned + agents spawned (+ test plan posted) | `fleet-started`, `test-plan`, `agent spawned` | `/webhook/linear` → planner |
 | build | every build agent run is terminal | `agent-done id=…` | `/api/reconcile` reads cloud runs |
-| review | build done → the PR(s) merged | `merged` (or `deployed`) | Bugbot on GitHub |
-| merge | every build PR merged to its default branch | `merged` (a deploy also implies it) | human merges PR; reconcile confirms via GitHub |
+| review | build done → the PR(s) merged | `merged` (or `deployed`) | Bugbot on GitHub + human merge |
 | deploy | Vercel `deployment.succeeded` arrived | `deployed` | `/webhook/vercel` |
-| observe | the post-deploy window closed with no alerts | `observe-complete` (or `remediated`) | `/api/reconcile` closes the window; `/webhook/datadog` on an alert |
-| remediate | hotfix PR opened by remediation agent | `remediated` (running) → `remediation-done` (done) | `/webhook/datadog` + `/api/reconcile` |
+| verify | verify agent reports pass, or remediate ends the window | `verify-pass` (or `remediated`) | verify agent + `/api/reconcile`; Datadog alert during window |
+| remediate | hotfix PR opened by remediation agent | `remediated` (running) → `remediation-done` (done) | `/webhook/datadog` or verify fail + `/api/reconcile` |
 
-**Critical operational note:** `build`, the PR URLs, `merge`, and the `observe`
+**Critical operational note:** `build`, the PR URLs, `review`, and the `verify`
 window close only advance after a `/api/reconcile` pass. That pass reads finished
 cloud runs, checks PR merge status on GitHub (needs `GH_TOKEN`), and closes the
-observe window once it elapses. Only `deploy` advances on its own via the Vercel
-webhook. Run reconcile on a cadence during the demo (section 5.1).
+verify window once the agent reports or the window elapses. Only `deploy` advances
+on its own via the Vercel webhook (which also spawns the verify agent). Run reconcile
+on a cadence during the demo (section 5.1).
 
 ---
 
 ## 3. Act 1 — happy path (FE-7, "AI advisor chat")
 
-**Narrative:** drag a ticket; a planner reads it, a cloud agent builds it and opens a
-PR, Bugbot reviews, you merge, Vercel deploys, and conductor records the deploy and
-posts "shipped, now scanning" to Slack, then the all-clear once the observe window
-closes. The dashboard tracks it all live.
+**Narrative:** drag a ticket; a planner reads it (and posts a test plan for SQA), a cloud agent builds it and opens a
+PR, Bugbot reviews, you merge, Vercel deploys, and conductor spawns a verify agent that runs the test plan on prod —
+then posts pass/fail to Slack. The dashboard tracks it all live.
 
 ### Beat A1 — Engage
 - **Action:** in Linear, move **FE-7** to **In Progress**.
@@ -154,7 +153,7 @@ closes. The dashboard tracks it all live.
 - **Fallback:** if nothing within ~20s, fire the manual trigger (section 5.2).
 
 ### Beat A2 — Plan → Build
-- **Expected (≤60s):** planner posts "chose N agent(s)"; one "Cursor agent spawned"
+- **Expected (≤60s):** planner posts "chose N agent(s)" and a **test plan** (top 3–5 critical checks); one "Cursor agent spawned"
   comment per task; `plan: done`, `build: running`.
 - **Verify:** `agents[]` for FE-7 is non-empty with `role: "build"`; stages show
   `plan: done`.
@@ -170,25 +169,25 @@ closes. The dashboard tracks it all live.
   ```
   Expect `done: true` and a `prUrl` once the run is terminal; `build: done`.
 
-### Beat A4 — Merge → Deploy → Observe
+### Beat A4 — Merge → Deploy → Verify
 - **Action:** merge the PR to `main` on GitHub.
 - **Expected (≤2–3 min):** Vercel auto-deploys compound; `/webhook/vercel` fires;
-  conductor posts `deployed` then `verified`; Slack shows **"🚀 compound shipped to
-  production"** with a "now scanning logs + errors" line; dashboard `merge/deploy: done`,
-  `observe: running`. The deploy makes no health claim yet.
-- **Then (after the observe window, `OBSERVE_WINDOW_MS`, default 2 min):** a reconcile
-  pass posts `observe-complete` and Slack shows **"✅ FE-7 — monitoring passed"**;
-  `observe: done`.
+  conductor posts `deployed`, spawns the verify agent, and Slack shows **"🚀 compound shipped to
+  production"** with a "now verifying" line; dashboard `review/deploy: done`,
+  `verify: running`.
+- **Then (after verify agent finishes or the window elapses):** a reconcile
+  pass posts `verify-pass` and Slack shows **"✅ FE-7 — verify passed"**;
+  `verify: done`.
 - **Verify:**
   ```bash
   curl -s "$BRIDGE_URL/api/board" | jq '.jobs[] | select(.identifier=="FE-7") | .stages'
   ```
-  Expect `deploy: done`, `observe: running` right after the deploy, flipping to
-  `observe: done` once the window closes (keep the reconcile loop in 5.1 running).
+  Expect `deploy: done`, `verify: running` right after the deploy, flipping to
+  `verify: done` once the agent reports (keep the reconcile loop in 5.1 running).
   Confirm both Slack messages arrived.
 - **Fallback:** if the Vercel webhook is missed, replay it (section 5.3).
 
-Act 1 ends with FE-7 shipped and the observe window closing clean (Slack posts the all-clear).
+Act 1 ends with FE-7 shipped and verify passing (Slack posts the green verdict).
 
 ---
 
@@ -324,8 +323,8 @@ rehearsal PRs so `main` is back to the fast baseline before the real run.
   **Datadog alerts carry no hint at all**, so the general fallback is "most recently
   updated matching fleet." With two concurrent `cursor-fleet` tickets mid-pipeline,
   a deploy or latency alert can therefore be misattributed. **Constraint: run only
-  one `cursor-fleet` ticket through deploy/observe/remediate at a time.** Let FE-7
-  fully ship (or reach `observe: done`) before moving FE-13 to In Progress; during
+  one `cursor-fleet` ticket through deploy/verify/remediate at a time.** Let FE-7
+  fully ship (or reach `verify: done`) before moving FE-13 to In Progress; during
   Act 2, no other fleet should be in the deploy/remediate stages.
 - **Regression must exceed 1500ms — now guaranteed by the ticket, not luck.** FE-13's
   acceptance criteria deterministically force the slow path: resolve each holding with

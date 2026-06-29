@@ -49,7 +49,7 @@ test("isDispatchableAlert accepts a latency-route match even when alert_type is 
 test("shouldDispatchToFleet does not dispatch when no fleet matches (prevents unbounded spawns)", () => {
   const decision = shouldDispatchToFleet({ hasFleet: false, alreadyRemediated: false, inFlight: false });
   assert.equal(decision.dispatch, false);
-  assert.match(decision.dispatch === false ? decision.reason : "", /observe window/);
+  assert.match(decision.dispatch === false ? decision.reason : "", /verify window/);
 });
 
 test("shouldDispatchToFleet does not dispatch when the fleet was already remediated", () => {

@@ -9,7 +9,7 @@
  *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
  *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
  *  - POST /webhook/linear  Linear webhook (signature-verified)
- *  - POST /webhook/vercel  Vercel deployment webhook -> observability agent
+ *  - POST /webhook/vercel  Vercel deployment webhook -> verify agent
  *  - POST /webhook/datadog Datadog monitor webhook -> remediation agent
  *
  * Moving a labeled ticket into "In Progress" fires the webhook, which spawns the
