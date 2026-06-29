@@ -81,7 +81,7 @@ export function shouldDispatchToFleet(input: {
   inFlight: boolean;
 }): FleetDispatchDecision {
   if (!input.hasFleet) {
-    return { dispatch: false, reason: "no fleet in active observe window; not dispatching" };
+    return { dispatch: false, reason: "no fleet in active verify window; not dispatching" };
   }
   if (input.alreadyRemediated) {
     return { dispatch: false, reason: "remediation already dispatched for this fleet" };
@@ -104,11 +104,11 @@ export async function handleDatadogAlert(body: unknown): Promise<RemediationResu
     return { handled: false, reason: "ignoring unrecognized or empty Datadog payload" };
   }
 
-  // Attach to the fleet actively in its post-deploy observe window. Once observe
-  // completes cleanly (or another fleet is observing), alerts are ignored so
+  // Attach to the fleet actively in its post-deploy verify window. Once verify
+  // completes cleanly (or another fleet is verifying), alerts are ignored so
   // happy-path tickets like FE-7 never get a remediation agent.
   const issue = await findActiveFleet(
-    (job) => job.stages.observe === "running" && job.stages.remediate === "pending",
+    (job) => job.stages.verify === "running" && job.stages.remediate === "pending",
   );
   // The has()→add() check-and-set below is synchronous (no await between them),
   // so concurrent invocations on one instance can't both pass the in-flight gate.

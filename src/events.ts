@@ -23,10 +23,14 @@ function inferStage(body: string): string | undefined {
   if (/conductor:remediation-done|conductor:remediation-agent|conductor:remediated/.test(body)) {
     return "remediate";
   }
-  if (/conductor:observe-complete/.test(body)) return "observe";
-  if (/conductor:verified/.test(body)) return "observe";
+  if (/conductor:verify-pass|conductor:verify-fail|conductor:verify-agent/.test(body)) {
+    return "verify";
+  }
+  if (/conductor:observe-complete/.test(body)) return "verify";
+  if (/conductor:verified/.test(body)) return "verify";
   if (/conductor:deployed/.test(body)) return "deploy";
-  if (/conductor:merged/.test(body)) return "merge";
+  if (/conductor:merged/.test(body)) return "review";
+  if (/conductor:test-plan|Test plan/i.test(body)) return "plan";
   if (/conductor:fleet-complete|conductor:agent-done/.test(body)) return "build";
   if (/agent spawned|agent failed to start/i.test(body)) return "build";
   if (/conductor:fleet-started|Planner chose/i.test(body)) return "plan";

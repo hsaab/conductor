@@ -9,7 +9,7 @@
  * the Linear ticket (the bridge posts comments as it goes), not `vercel logs`.
  */
 import { cursorKey, deployTargetRepo, ghOwner, maxAgents, plannerModelId } from "./config.js";
-import type { LinearIssuePayload } from "./types.js";
+import type { LinearIssuePayload, TestCase } from "./types.js";
 
 /**
  * The kind of work a task represents. The planner classifies each task so the
@@ -18,6 +18,9 @@ import type { LinearIssuePayload } from "./types.js";
 export type TaskKind = "feature" | "bug" | "test";
 
 const TASK_KINDS: readonly TaskKind[] = ["feature", "bug", "test"];
+
+/** Upper bound on test-plan cases (top 3-5 critical checks). */
+export const MAX_TEST_CASES = 5;
 
 /** Normalizes any free-form kind string to a known {@link TaskKind}. */
 export function normalizeKind(value: unknown): TaskKind {
@@ -60,29 +63,54 @@ export function sanitizePlan(tasks: PlannedTask[]): PlannedTask[] {
   return out;
 }
 
-/** Pulls a `{ tasks: [...] }` object out of the planner agent's free-form reply. */
-export function parsePlanText(text: string): PlannedTask[] {
-  if (!text) return [];
+/** Normalizes and caps a test plan to at most {@link MAX_TEST_CASES} concise cases. */
+export function sanitizeTestPlan(cases: TestCase[]): TestCase[] {
+  const out: TestCase[] = [];
+  for (const entry of cases) {
+    const title = entry.title?.trim();
+    const steps = entry.steps?.trim();
+    if (!title || !steps) continue;
+    out.push({ title, steps });
+    if (out.length >= MAX_TEST_CASES) break;
+  }
+  return out;
+}
+
+/** Pulls a `{ tasks, testPlan }` object out of the planner agent's free-form reply. */
+export function parsePlanText(text: string): { tasks: PlannedTask[]; testPlan: TestCase[] } {
+  if (!text) return { tasks: [], testPlan: [] };
   // Prefer a fenced ```json block; otherwise take the first {...} span.
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   const candidate = fenced ?? (start !== -1 && end > start ? text.slice(start, end + 1) : "");
-  if (!candidate) return [];
+  if (!candidate) return { tasks: [], testPlan: [] };
   try {
     const parsed: unknown = JSON.parse(candidate);
-    const tasksRaw = (parsed as { tasks?: unknown }).tasks;
-    if (!Array.isArray(tasksRaw)) return [];
-    return tasksRaw.map((entry) => {
-      const obj = (entry ?? {}) as { repo?: unknown; instructions?: unknown; kind?: unknown };
-      return {
-        repo: String(obj.repo ?? ""),
-        instructions: String(obj.instructions ?? ""),
-        kind: normalizeKind(obj.kind),
-      };
-    });
+    const root = parsed as { tasks?: unknown; testPlan?: unknown };
+    const tasksRaw = root.tasks;
+    const testPlanRaw = root.testPlan;
+    const tasks = Array.isArray(tasksRaw)
+      ? tasksRaw.map((entry) => {
+          const obj = (entry ?? {}) as { repo?: unknown; instructions?: unknown; kind?: unknown };
+          return {
+            repo: String(obj.repo ?? ""),
+            instructions: String(obj.instructions ?? ""),
+            kind: normalizeKind(obj.kind),
+          };
+        })
+      : [];
+    const testPlan = Array.isArray(testPlanRaw)
+      ? sanitizeTestPlan(
+          testPlanRaw.map((entry) => {
+            const obj = (entry ?? {}) as { title?: unknown; steps?: unknown };
+            return { title: String(obj.title ?? ""), steps: String(obj.steps ?? "") };
+          }),
+        )
+      : [];
+    return { tasks, testPlan };
   } catch {
-    return [];
+    return { tasks: [], testPlan: [] };
   }
 }
 
@@ -155,6 +183,8 @@ Classify each task with a "kind" that drives which workflow the build agent runs
 - "test": add or migrate tests; prioritize coverage and test infrastructure.
 Infer the kind from the ticket: labels like "bug"/"defect" or words like "fix", "broken", "regression", "error" imply "bug"; labels like "test"/"qa" or words like "coverage", "migrate tests" imply "test"; otherwise "feature".
 
+Also produce a focused testPlan: the **3-5 most critical** acceptance checks a QA engineer would run against the deployed feature. Rank by importance; skip trivial edge cases. Each case is one concise title plus brief steps (what to do and what to expect). Do not exceed 5 cases.
+
 Ticket:
 - ID: ${issue.identifier}
 - Title: ${issue.title}
@@ -170,7 +200,7 @@ ${hints}
 You are ONLY planning. Do not modify files, run commands, or open a pull request — just answer.
 
 Respond with ONLY a JSON object, no prose and no markdown fences, in exactly this shape:
-{"tasks":[{"repo":"owner/repo","kind":"feature|bug|test","instructions":"concrete implementation steps for this repo only"}]}`;
+{"tasks":[{"repo":"owner/repo","kind":"feature|bug|test","instructions":"concrete implementation steps for this repo only"}],"testPlan":[{"title":"short case name","steps":"what to verify and expected outcome"}]}`;
 }
 
 function defaultInstructions(issue: LinearIssuePayload): string {
@@ -183,6 +213,35 @@ function inferKindFromIssue(issue: LinearIssuePayload): TaskKind {
   if (/\b(bug|defect|fix|broken|regression|error|crash|incident|hotfix)\b/.test(haystack)) return "bug";
   if (/\b(test|tests|qa|coverage|spec|e2e)\b/.test(haystack)) return "test";
   return "feature";
+}
+
+/**
+ * Deterministic test-plan fallback from acceptance-criteria bullets in the ticket.
+ * Takes the first 3-5 checklist items when present; otherwise one case from the title.
+ */
+export function fallbackTestPlan(issue: LinearIssuePayload): TestCase[] {
+  const text = issue.description ?? "";
+  const acMatch = text.match(/(?:^|\n)#+\s*acceptance criteria\s*\n([\s\S]*?)(?:\n#+\s|\n*$)/i);
+  const scope = acMatch?.[1]?.trim() ? acMatch[1] : text;
+  const bullets: string[] = [];
+  for (const line of scope.split("\n")) {
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/)?.[1] ?? line.match(/^\s*\d+[.)]\s+(.+)$/)?.[1];
+    if (bullet) bullets.push(bullet.replace(/[`*]/g, "").trim());
+  }
+  if (bullets.length === 0) {
+    return sanitizeTestPlan([
+      {
+        title: issue.title,
+        steps: `Verify the feature "${issue.title}" meets the ticket's acceptance criteria on the deployed site.`,
+      },
+    ]);
+  }
+  return sanitizeTestPlan(
+    bullets.slice(0, MAX_TEST_CASES).map((b) => ({
+      title: b.length > 72 ? `${b.slice(0, 69)}…` : b,
+      steps: b,
+    })),
+  );
 }
 
 /** A default-instruction task for each repo the ticket explicitly names. */
@@ -240,16 +299,18 @@ const plannerHostRepo = `https://github.com/${ghOwner}/${knownRepos[0].repo}`;
  */
 export interface FleetPlan {
   tasks: PlannedTask[];
+  testPlan: TestCase[];
   usedFallback: boolean;
   fallbackReason?: string;
 }
 
 function fallbackFleetPlan(issue: LinearIssuePayload, fallbackReason: string): FleetPlan {
   const plan = fallbackPlan(issue);
+  const testPlan = fallbackTestPlan(issue);
   console.log(
-    `[planner] Fallback plan (${fallbackReason}): ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}`,
+    `[planner] Fallback plan (${fallbackReason}): ${plan.length} agent(s) → ${plan.map((t) => `${t.repo} (${t.kind})`).join(", ")}; ${testPlan.length} test case(s)`,
   );
-  return { tasks: plan, usedFallback: true, fallbackReason };
+  return { tasks: plan, testPlan, usedFallback: true, fallbackReason };
 }
 
 /** Condensed, single-line error text safe to surface in a Linear comment. */
@@ -281,7 +342,7 @@ function plannerRetryDelayMs(): number {
 
 /** Outcome of a single planner attempt: a usable task list, or why it failed. */
 export type PlannerAttempt =
-  | { ok: true; tasks: PlannedTask[] }
+  | { ok: true; tasks: PlannedTask[]; testPlan: TestCase[] }
   | { ok: false; reason: string; transient: boolean };
 
 /**
@@ -309,8 +370,10 @@ async function runPlannerOnce(issue: LinearIssuePayload, apiKey: string): Promis
     if (result.status === "finished" && result.result) {
       // Union in any repo the ticket explicitly names but the agent omitted, so
       // an explicitly multi-repo ticket never silently drops a repo to the LLM.
-      const plan = withTicketRepos(parsePlanText(result.result), issue);
-      if (plan.length) return { ok: true, tasks: plan };
+      const parsed = parsePlanText(result.result);
+      const plan = withTicketRepos(parsed.tasks, issue);
+      const testPlan = parsed.testPlan.length > 0 ? parsed.testPlan : fallbackTestPlan(issue);
+      if (plan.length) return { ok: true, tasks: plan, testPlan };
       return { ok: false, reason: "planner returned no parseable plan", transient: false };
     }
     return { ok: false, reason: `planner run ${result.status}`, transient: true };
@@ -337,9 +400,9 @@ export async function planWithRetries(
     const outcome = await attempt();
     if (outcome.ok) {
       console.log(
-        `[planner] Plan: ${outcome.tasks.length} agent(s) → ${outcome.tasks.map((t) => `${t.repo} (${t.kind})`).join(", ")}`,
+        `[planner] Plan: ${outcome.tasks.length} agent(s) → ${outcome.tasks.map((t) => `${t.repo} (${t.kind})`).join(", ")}; ${outcome.testPlan.length} test case(s)`,
       );
-      return { tasks: outcome.tasks, usedFallback: false };
+      return { tasks: outcome.tasks, testPlan: outcome.testPlan, usedFallback: false };
     }
     lastReason = outcome.reason;
     const willRetry = outcome.transient && i < maxAttempts;

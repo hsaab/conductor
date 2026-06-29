@@ -6,7 +6,7 @@
 import { cursorKey, deployTargetRepo, ghOwner, markers, modelId } from "./config.js";
 import { postComment } from "./linear.js";
 import type { PlannedTask } from "./planner.js";
-import type { LinearIssuePayload } from "./types.js";
+import type { LinearIssuePayload, TestCase } from "./types.js";
 
 /**
  * Maps a task kind to the compound skill and workflow emphasis the fleet agent
@@ -100,6 +100,119 @@ export async function spawnAgent(task: PlannedTask, issue: LinearIssuePayload): 
     const msg = formatAgentError(err);
     console.error(`[${name}] Failed to start on ${task.repo}: ${msg}`);
     await postComment(issue.id, `${markers.bridge}\n**Cursor agent failed to start**\n\nRepo: \`${task.repo}\`\n\n${msg}`);
+  }
+}
+
+export interface VerifyRunInput {
+  issue: LinearIssuePayload;
+  prodUrl: string;
+  testPlan: TestCase[];
+}
+
+function verifyPrompt(input: VerifyRunInput): string {
+  const cases = input.testPlan
+    .map((c, i) => `${i + 1}. **${c.title}**\n   Steps: ${c.steps}`)
+    .join("\n\n");
+  const repo = `${ghOwner}/${deployTargetRepo}`;
+  return `You are the post-deploy verify agent for ticket ${input.issue.identifier}.
+
+## Deployed site
+${input.prodUrl}
+
+## Test plan (run each case against the live site)
+${cases || "Verify the ticket acceptance criteria on the deployed site."}
+
+## Ticket context
+# ${input.issue.identifier}: ${input.issue.title}
+
+${input.issue.description ?? ""}
+
+## Your job
+1. Exercise each test-plan case against ${input.prodUrl} (browser/API as appropriate).
+2. Note pass/fail per case with brief evidence.
+3. End your reply with exactly one machine-readable line:
+   VERIFY_RESULT: PASS — <one-line summary>
+   or
+   VERIFY_RESULT: FAIL — <one-line summary>
+
+Do NOT open a PR or modify any repository. Verification only.`;
+}
+
+/**
+ * Spawn a verify cloud agent that runs the test plan against the deployed site.
+ * Returns the agent id, or null on failure.
+ */
+export async function spawnVerifyAgent(input: VerifyRunInput): Promise<string | null> {
+  const repo = `${ghOwner}/${deployTargetRepo}`;
+  console.log(
+    `[verify] Starting a Cursor cloud agent on github.com/${repo} for ${input.issue.identifier} → ${input.prodUrl}`,
+  );
+  try {
+    const { Agent } = await import("@cursor/sdk");
+    await using agent = await Agent.create({
+      apiKey: cursorKey(),
+      model: { id: modelId },
+      cloud: {
+        repos: [{ url: `https://github.com/${repo}` }],
+        autoCreatePR: false,
+        skipReviewerRequest: true,
+      },
+    });
+    const run = await agent.send(verifyPrompt(input));
+    console.log(`[verify] Launched on ${repo} — agent ${agent.agentId}, run ${run.id}.`);
+    await postComment(
+      input.issue.id,
+      `${markers.verifySpawned(agent.agentId)}
+${markers.bridge}
+**🔍 Verify agent dispatched** — running the test plan against the deployed site.
+
+Agent ID: \`${agent.agentId}\`
+Site: ${input.prodUrl}
+Repo: \`${repo}\``,
+    );
+    return agent.agentId;
+  } catch (err) {
+    const msg = formatAgentError(err);
+    console.error(`[verify] Failed to start on ${repo}: ${msg}`);
+    await postComment(
+      input.issue.id,
+      `${markers.bridge}\n**Verify agent failed to start**\n\n${msg}`,
+    );
+    return null;
+  }
+}
+
+/** Parses PASS/FAIL from the verify agent's machine-readable verdict line. */
+export function parseVerifyVerdict(text: string): "pass" | "fail" | null {
+  const match = text.match(/VERIFY_RESULT:\s*(PASS|FAIL)/i);
+  if (!match) return null;
+  return match[1].toUpperCase() === "PASS" ? "pass" : "fail";
+}
+
+export interface AgentRunResult {
+  terminal: boolean;
+  status: string;
+  resultText?: string;
+}
+
+/**
+ * Reads a cloud agent's latest run output text (for verify verdict parsing).
+ * Returns null when the run cannot be read yet.
+ */
+export async function readAgentRunResult(agentId: string): Promise<AgentRunResult | null> {
+  const { Agent } = await import("@cursor/sdk");
+  try {
+    const runs = await Agent.listRuns(agentId, { runtime: "cloud", apiKey: cursorKey() });
+    const run = pickLatestRun(runs.items) as
+      | { status?: string; result?: string; output?: string }
+      | undefined;
+    if (!run?.status) return null;
+    const terminal = run.status === "finished" || run.status === "error" || run.status === "cancelled";
+    const resultText = run.result ?? run.output;
+    return { terminal, status: run.status, resultText };
+  } catch (err) {
+    console.error(`[verify] could not read runs for ${agentId}:`, err);
+    return null;
   }
 }
 

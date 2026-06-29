@@ -12,10 +12,10 @@
  * glance which steps are autonomous agents, which are human-in-the-loop, which are
  * a hybrid hand-off, and which are plain automation (CI / monitors, not an agent):
  *
- *   - agent  → autonomous Cursor cloud agent (plan, build, remediate)
- *   - hybrid → agent proposes, human decides    (review: Bugbot + human)
- *   - human  → human-in-the-loop                (merge)
- *   - auto   → automation, no agent             (deploy CI, observe monitors)
+ *   - agent  → autonomous Cursor cloud agent (plan, build, verify, remediate)
+ *   - hybrid → agent proposes, human decides    (review: Bugbot + merge)
+ *   - human  → (unused in 6-stage line)
+ *   - auto   → automation, no agent             (deploy CI)
  */
 export const dashboardHtml = /* html */ `<!doctype html>
 <html lang="en">
@@ -170,9 +170,8 @@ export const dashboardHtml = /* html */ `<!doctype html>
   .log-dot.plan { background: #8b949e; }
   .log-dot.build { background: var(--accent); }
   .log-dot.review { background: #d29922; }
-  .log-dot.merge { background: #a371f7; }
   .log-dot.deploy { background: var(--done); }
-  .log-dot.observe { background: #58a6ff; }
+  .log-dot.verify { background: #58a6ff; }
   .log-dot.remediate { background: var(--failed); }
   .log-time { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; padding-top: 1px; }
   .log-body { min-width: 0; }
@@ -196,7 +195,7 @@ export const dashboardHtml = /* html */ `<!doctype html>
 </main>
 <footer>Polls <code>/api/board</code> every 2s (pause from the header) · pipeline state and activity log derived from the Linear comment thread</footer>
 <script>
-  const STAGES = ["plan", "build", "review", "merge", "deploy", "observe", "remediate"];
+  const STAGES = ["plan", "build", "review", "deploy", "verify", "remediate"];
 
   // Stroked SVG icons. They inherit color from their operator context so the same
   // markup serves the legend, the station chips, and the hybrid two-tone pairing.
@@ -210,10 +209,9 @@ export const dashboardHtml = /* html */ `<!doctype html>
   const STAGE_META = {
     plan:      { op: "agent",  worker: "Planner agent" },
     build:     { op: "agent",  worker: "Fleet agents" },
-    review:    { op: "hybrid", worker: "Bugbot + human" },
-    merge:     { op: "human",  worker: "Human merge" },
+    review:    { op: "hybrid", worker: "Bugbot + merge" },
     deploy:    { op: "auto",   worker: "Vercel CI" },
-    observe:   { op: "auto",   worker: "Monitors" },
+    verify:    { op: "agent",  worker: "Verify agent" },
     remediate: { op: "agent",  worker: "Hotfix agent" },
   };
 

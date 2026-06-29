@@ -6,12 +6,13 @@
  * parsers turn a fetched issue's comments back into structured agent records.
  */
 import crypto from "node:crypto";
-import { linearKey, reactionEmoji } from "./config.js";
+import { linearKey, markers, reactionEmoji } from "./config.js";
 import type {
   LinearConnection,
   LinearIssuePayload,
   LinearIssueRecord,
   SpawnedAgent,
+  TestCase,
 } from "./types.js";
 
 const AGENT_ID_RE = /Agent ID:\s*`(bc-[0-9a-zA-Z_-]+)`/;
@@ -217,6 +218,55 @@ export function hasRemediationDone(issue: LinearIssuePayload): boolean {
   return issue.comments?.some((c) => /conductor:remediation-done/.test(c.body ?? "")) ?? false;
 }
 
+const VERIFY_SPAWN_RE = /conductor:verify-agent id=(bc-[0-9a-zA-Z_-]+)/;
+
+/** Verify agents dispatched for an issue (tracked separately from build/remediation). */
+export function parseVerifyAgents(issue: LinearIssuePayload): SpawnedAgent[] {
+  const seen = new Set<string>();
+  const agents: SpawnedAgent[] = [];
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    const agentId = body.match(VERIFY_SPAWN_RE)?.[1];
+    const repo = body.match(REPO_RE)?.[1];
+    if (!agentId || !repo || seen.has(agentId)) continue;
+    seen.add(agentId);
+    agents.push({ agentId, repo });
+  }
+  return agents;
+}
+
+/** Parses the test plan JSON embedded in a test-plan comment (fenced block). */
+export function parseTestPlan(issue: LinearIssuePayload): TestCase[] {
+  for (const comment of issue.comments ?? []) {
+    const body = comment.body ?? "";
+    if (!body.includes(markers.testPlan)) continue;
+    const fenced = body.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+    if (!fenced) continue;
+    try {
+      const parsed = JSON.parse(fenced) as { cases?: unknown };
+      if (!Array.isArray(parsed.cases)) continue;
+      return parsed.cases
+        .map((entry) => {
+          const obj = (entry ?? {}) as { title?: unknown; steps?: unknown };
+          return { title: String(obj.title ?? "").trim(), steps: String(obj.steps ?? "").trim() };
+        })
+        .filter((c) => c.title && c.steps)
+        .slice(0, 5);
+    } catch {
+      continue;
+    }
+  }
+  return [];
+}
+
+export function hasVerifyPass(issue: LinearIssuePayload): boolean {
+  return hasComment(issue, markers.verifyPass);
+}
+
+export function hasVerifyFail(issue: LinearIssuePayload): boolean {
+  return hasComment(issue, markers.verifyFail);
+}
+
 /**
  * True for any comment the bridge authored. Newer comments carry a hidden
  * `cursor-demo-bridge` marker, but we also match by content signature so reset
@@ -228,6 +278,8 @@ const BRIDGE_SIGNATURES = [
   /cursor-demo-bridge/, // legacy marker, so reset still cleans comments from older deploys
   /Cursor .*agent (spawned|finished|failed)/i,
   /Cursor (fleet|bridge|conductor) (accepted|complete|engaged)/i,
+  /Test plan/i,
+  /Verify agent/i,
 ];
 
 export function isBridgeComment(body: string | null | undefined): boolean {

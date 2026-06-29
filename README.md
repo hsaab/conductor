@@ -16,22 +16,19 @@ At a high level:
 ```mermaid
 flowchart TD
   Ticket["Linear ticket<br/>label cursor-fleet to In Progress"] -->|webhook| Linear["conductor /webhook/linear"]
-  Linear --> Planner["Planner agent<br/>classify feature/bug/test"]
+  Linear --> Planner["Planner agent<br/>build plan + test plan"]
   Planner --> Fleet["N fleet agents<br/>one per planned repo"]
   Fleet --> PR["Pull requests opened"]
-  PR --> Bugbot["Bugbot review"]
-  Bugbot --> Merge["Human merges PR"]
-  Merge --> Vercel["Vercel auto-deploys"]
+  PR --> Bugbot["Bugbot review + human merge"]
+  Bugbot --> Vercel["Vercel auto-deploys"]
   Vercel --> Prod["production"]
   Vercel -->|deployment.succeeded| VHook["conductor /webhook/vercel"]
-  VHook --> Obs["Record deploy<br/>open observe window"]
-  Obs --> Slack1["Slack: shipped, now scanning logs + errors"]
-  Obs --> Observe["Observe window<br/>OBSERVE_WINDOW_MS"]
-  Cron["/api/reconcile cron"] -->|reports PRs| Linear
-  Cron -->|window elapsed, no alerts| Clear["Slack: all clear<br/>observe-complete verdict"]
-  Observe -.->|polled by| Cron
+  VHook --> Verify["Verify agent<br/>runs test plan on prod"]
+  Verify --> Slack1["Slack: shipped + verifying"]
+  Cron["/api/reconcile cron"] -->|reports PRs + verify verdict| Linear
+  Cron -->|verify pass| Clear["Slack: verify passed"]
   Synthetic["Datadog Synthetic / monitor"] --> Prod
-  Synthetic -->|alert during observe window| DHook["conductor /webhook/datadog"]
+  Synthetic -->|alert during verify window| DHook["conductor /webhook/datadog"]
   DHook --> Remediate["Remediation agent<br/>opens hotfix PR"]
   Remediate --> Slack2["Slack: latency detected + hotfix PR"]
   Remediate -.->|hotfix PR re-enters loop| PR
@@ -52,14 +49,15 @@ flowchart TD
    `Agent.listRuns`, and posts completion comments with PR URLs once a run opens
    its PR (or the run finishes). Idempotent per-agent `agent-done` markers prevent
    duplicate reports.
-3. **Deploy + observe** (`/webhook/vercel`): a successful production deployment
-   of the target repo marks the matching fleet deployed, scans for errors already
-   in production, and posts a "shipped, now scanning" note to Slack. The all-clear
-   verdict comes later, when the reconciler closes the observe window with no
-   alerts.
-4. **Remediate** (`/webhook/datadog`): a Datadog alert attaches to the active
-   deployed fleet, announces the problem to Slack, and dispatches a remediation
-   cloud agent that opens a hotfix PR.
+3. **Deploy + verify** (`/webhook/vercel`): a successful production deployment
+   of the target repo marks the matching fleet deployed, spawns a verify cloud agent
+   that runs the ticket's test plan against the live site, and posts a "shipped,
+   now verifying" note to Slack. The reconciler posts pass/fail when the agent
+   finishes (or when the verify window elapses with no failure).
+4. **Remediate** (`/webhook/datadog` or verify fail): a Datadog alert during the
+   verify window (or a failed verify verdict) attaches to the active fleet,
+   announces the problem to Slack, and dispatches a remediation cloud agent that
+   opens a hotfix PR.
 
 Two **manual operator endpoints** exist as backups for the normal webhook flow:
 `POST /api/trigger` launches a fleet for an issue id, and `POST /api/reset`
@@ -77,13 +75,12 @@ in Linear comment markers:
 
 | Stage | Trigger | What runs |
 |---|---|---|
-| Plan | `cursor-fleet` ticket to In Progress (`/webhook/linear`) | Planner agent classifies the ticket and emits one task per repo |
+| Plan | `cursor-fleet` ticket to In Progress (`/webhook/linear`) | Planner agent classifies the ticket, emits one build task per repo, and posts a focused test plan (top 3–5 critical checks) for SQA |
 | Build | after planning | One fleet cloud agent per task opens a PR |
-| Review | PR opened | Bugbot reviews the PR |
-| Merge | human merges the PR | Conductor confirms the merge via the GitHub API (the reconciler writes a `merged` marker) |
-| Deploy | Vercel `deployment.succeeded` (`/webhook/vercel`) | Conductor records the deploy and opens the observe window (scanning for errors already present) |
-| Observe | post-deploy window + Datadog monitors | Conductor watches production; the reconciler posts the all-clear when the window closes with no alerts, or remediate takes over on an alert |
-| Remediate | Datadog monitor alert (`/webhook/datadog`) | Remediation agent diagnoses and opens a hotfix PR |
+| Review | PR opened → merged | Bugbot reviews the PR; human merges; reconciler confirms merge via GitHub (`merged` marker) |
+| Deploy | Vercel `deployment.succeeded` (`/webhook/vercel`) | Conductor records the deploy and spawns the verify agent |
+| Verify | post-deploy | Verify agent runs the test plan against production; reconciler posts pass/fail; Datadog alerts during this window still trigger remediate |
+| Remediate | Datadog alert or verify fail (`/webhook/datadog` / reconcile) | Remediation agent diagnoses and opens a hotfix PR |
 
 ## HTTP surface
 
@@ -114,7 +111,7 @@ request blocks on a multi-minute agent run.
 
 | Variable | Purpose |
 |---|---|
-| `CURSOR_API_KEY` | Cursor SDK auth (planner, fleet, and remediation agents; reconcile reads run status) |
+| `CURSOR_API_KEY` | Cursor SDK auth (planner, fleet, verify, and remediation agents; reconcile reads run status) |
 | `LINEAR_API_KEY` | Post comments/reactions back to Linear (must match the workspace that owns the webhook) |
 | `LINEAR_WEBHOOK_SECRET` | Verify Linear webhook signatures |
 | `BRIDGE_TRIGGER_SECRET` | Secure `/api/trigger`, `/api/reset`, and manual `/api/reconcile` |
@@ -128,7 +125,7 @@ request blocks on a multi-minute agent run.
 | `GH_OWNER` | GitHub org/user (default: `hsaab`) |
 | `GH_TOKEN` | Optional. Reads PR merge status so review/merge advance on the real merge (needed for private target repos). Without it, a successful deploy is treated as proof of merge. Repo-scoped; named `GH_TOKEN` to avoid clobbering local `gh`/git auth. |
 | `DEPLOY_TARGET_REPO` | Repo the loop builds/observes (default: `compound`) |
-| `OBSERVE_WINDOW_MS` | Post-deploy monitoring window before observe closes cleanly (default: `120000`, 2 min) |
+| `OBSERVE_WINDOW_MS` | Post-deploy verify window before a clean-pass fallback (default: `120000`, 2 min) |
 | `BRIDGE_MODEL_ID` | Cloud model for spawned agents (default: `composer-2.5`) |
 | `PLANNER_MODEL_ID` | Model the planner agent uses (default: `composer-2.5`) |
 | `PLANNER_MAX_ATTEMPTS` | How many times the planner agent is tried before falling back, so a transient cloud-run error is retried instead of degrading the plan (default: `2`; `1` disables retries) |

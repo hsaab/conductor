@@ -175,10 +175,11 @@ idempotent store.
 | `conductor:fleet-started` | **before** spawning | dedupe so a fleet launches at most once per ticket |
 | `conductor:agent-done id=bc-...` | when an agent's PR is reported | keeps reconcile from reporting the same agent twice |
 | `conductor:fleet-complete` | when all agents have reported | posts the one-time "fleet complete" summary |
-| `conductor:merged` | when every build PR has merged on GitHub | advances review/merge on the real merge |
-| `conductor:deployed` / `conductor:verified` | after the Vercel deploy is recorded and the observe window opens | starts deploy; opens observe (scanning, no health verdict yet) |
-| `conductor:observe-complete` | when the post-deploy window passes with no alerts | closes observe with the all-clear on the happy path (e.g. FE-7) |
-| `conductor:remediated` | when a Datadog alert dispatches remediation | starts remediate; dedupes repeat alerts |
+| `conductor:merged` | when every build PR has merged on GitHub | advances review (Bugbot + merge) on the real merge |
+| `conductor:test-plan` | during planning | posts the top 3–5 critical QA checks for SQA review |
+| `conductor:deployed` / `conductor:verify-agent` | after deploy + verify agent spawn | records deploy; starts verify window |
+| `conductor:verify-pass` / `conductor:verify-fail` | when verify agent reports (or window elapses) | closes verify with pass/fail |
+| `conductor:remediated` | when a Datadog alert or verify fail dispatches remediation | starts remediate; dedupes repeat alerts |
 | `conductor:remediation-agent` / `conductor:remediation-done` | around Datadog-triggered hotfix work | tracks remediation separately from build agents |
 | `conductor:announced` | when a stage result has been posted to Slack | marks Slack output as sent |
 
@@ -197,7 +198,7 @@ Everything the diagrams reference, mapped to the source.
 | Planner prompt + task selection | [`src/planner.ts`](src/planner.ts) |
 | Fleet-agent task prompt | `buildPrompt()` in [`src/agents.ts`](src/agents.ts) |
 | Reconcile finished runs → PR URLs | `reconcileAll()` in [`src/fleet.ts`](src/fleet.ts), `checkAgentRun()` in [`src/agents.ts`](src/agents.ts) |
-| Deploy + observe (record deploy, open window, all-clear) | `handleVercelDeployment()` in [`src/observability.ts`](src/observability.ts), `reconcileObserve()` in [`src/fleet.ts`](src/fleet.ts) |
+| Deploy + verify (record deploy, spawn verify agent) | `handleVercelDeployment()` in [`src/observability.ts`](src/observability.ts), `reconcileVerify()` in [`src/fleet.ts`](src/fleet.ts) |
 | Deploy-time error scan (Datadog logs) | `checkServiceHealth()` in [`src/datadog.ts`](src/datadog.ts) |
 | Remediation (Datadog alert → hotfix agent) | `handleDatadogAlert()` in [`src/remediation.ts`](src/remediation.ts), `spawnRemediationAgent()` in [`src/agents.ts`](src/agents.ts) |
 | Slack output (deploy + remediation) | `postSlack()` / `statusBlocks()` in [`src/slack.ts`](src/slack.ts) |
