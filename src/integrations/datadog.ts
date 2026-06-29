@@ -9,7 +9,7 @@
  * returns an "unknown" result and conductor simply has nothing to warn about, so
  * the loop never blocks on Datadog being wired up.
  */
-import { datadogApiKey, datadogAppKey, datadogSite } from "./config.js";
+import { datadogApiKey, datadogAppKey, datadogSite } from "../config.js";
 
 export interface ServiceHealth {
   /** Number of error logs in the window, or null when Datadog is not configured/queryable. */

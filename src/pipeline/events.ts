@@ -7,8 +7,8 @@
  * and when. This module is pure (no network), so it is unit-testable alongside
  * {@link summarizeJob}.
  */
-import { isBridgeComment } from "./linear.js";
-import type { JobEvent, LinearIssuePayload } from "./types.js";
+import { isBridgeComment } from "../integrations/linear.js";
+import type { JobEvent, LinearIssuePayload } from "../types.js";
 
 /** Matches the hidden HTML-comment markers so only human-readable text remains. */
 const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;

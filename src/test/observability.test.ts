@@ -6,8 +6,8 @@ import {
   extractDeployment,
   isPreviewDeployUrl,
   isProductionDeployment,
-} from "../observability.js";
-import type { ServiceHealth } from "../datadog.js";
+} from "../pipeline/observability.js";
+import type { ServiceHealth } from "../integrations/datadog.js";
 
 const unknown: ServiceHealth = { errors: null, unknown: true };
 

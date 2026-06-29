@@ -89,9 +89,9 @@ The `par` block is the detail the overview leaves out: all planned repo agents
 spawn **together**, and the `fleet-started` marker is written *before* any spawn
 so a repeated delivery is deduped. Returns in **seconds** — the bridge never blocks.
 Code: `handleWebhook()` in [`src/index.ts`](src/index.ts), `triggerFleet()` /
-`shouldSpawn()` / `resetIssue()` in [`src/fleet.ts`](src/fleet.ts), `spawnAgent()`
-/ `buildPrompt()` in [`src/agents.ts`](src/agents.ts), signature check in
-[`src/security.ts`](src/security.ts).
+`shouldSpawn()` / `resetIssue()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts), `spawnAgent()`
+/ `buildPrompt()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts), signature check in
+[`src/http/security.ts`](src/http/security.ts).
 
 ### 2. Reconcile — an agent finishes
 
@@ -122,8 +122,8 @@ sequenceDiagram
 
 Idempotent: the per-agent `agent-done` markers mean an agent is reported exactly
 once, no matter how often the sweep runs.
-Code: `reconcileAll()` in [`src/fleet.ts`](src/fleet.ts),
-`checkAgentRun()` in [`src/agents.ts`](src/agents.ts).
+Code: `reconcileAll()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts),
+`checkAgentRun()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts).
 
 > **Cron cadence.** `vercel.json` schedules `/api/reconcile` once daily
 > (`0 9 * * *`) so it deploys on a **Hobby** plan. On **Vercel Pro**, bump the
@@ -193,19 +193,19 @@ Everything the diagrams reference, mapped to the source.
 |---|---|
 | HTTP surface — every route | [`src/index.ts`](src/index.ts) |
 | Webhook handler (trigger + reset-on-leave) | `handleWebhook()` in [`src/index.ts`](src/index.ts) |
-| Decide to spawn / launch the fleet | `shouldSpawn()`, `triggerFleet()` in [`src/fleet.ts`](src/fleet.ts) |
-| Spawn one cloud agent (fire-and-forget) | `spawnAgent()` in [`src/agents.ts`](src/agents.ts) |
-| Planner prompt + task selection | [`src/planner.ts`](src/planner.ts) |
-| Fleet-agent task prompt | `buildPrompt()` in [`src/agents.ts`](src/agents.ts) |
-| Reconcile finished runs → PR URLs | `reconcileAll()` in [`src/fleet.ts`](src/fleet.ts), `checkAgentRun()` in [`src/agents.ts`](src/agents.ts) |
-| Deploy + verify (record deploy, spawn verify agent) | `handleVercelDeployment()` in [`src/observability.ts`](src/observability.ts), `reconcileVerify()` in [`src/fleet.ts`](src/fleet.ts) |
-| Deploy-time error scan (Datadog logs) | `checkServiceHealth()` in [`src/datadog.ts`](src/datadog.ts) |
-| Remediation (Datadog alert → hotfix agent) | `handleDatadogAlert()` in [`src/remediation.ts`](src/remediation.ts), `spawnRemediationAgent()` in [`src/agents.ts`](src/agents.ts) |
-| Slack output (deploy + remediation) | `postSlack()` / `statusBlocks()` in [`src/slack.ts`](src/slack.ts) |
-| Re-arm a ticket on leave | `resetIssue()` in [`src/fleet.ts`](src/fleet.ts), `deleteBridgeComments()` in [`src/linear.ts`](src/linear.ts) |
-| Linear access + comment parsers | [`src/linear.ts`](src/linear.ts) |
+| Decide to spawn / launch the fleet | `shouldSpawn()`, `triggerFleet()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts) |
+| Spawn one cloud agent (fire-and-forget) | `spawnAgent()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts) |
+| Planner prompt + task selection | [`src/pipeline/planner.ts`](src/pipeline/planner.ts) |
+| Fleet-agent task prompt | `buildPrompt()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts) |
+| Reconcile finished runs → PR URLs | `reconcileAll()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts), `checkAgentRun()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts) |
+| Deploy + verify (record deploy, spawn verify agent) | `handleVercelDeployment()` in [`src/pipeline/observability.ts`](src/pipeline/observability.ts), `reconcileVerify()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts) |
+| Deploy-time error scan (Datadog logs) | `checkServiceHealth()` in [`src/integrations/datadog.ts`](src/integrations/datadog.ts) |
+| Remediation (Datadog alert → hotfix agent) | `handleDatadogAlert()` in [`src/pipeline/remediation.ts`](src/pipeline/remediation.ts), `spawnRemediationAgent()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts) |
+| Slack output (deploy + remediation) | `postSlack()` / `statusBlocks()` in [`src/integrations/slack.ts`](src/integrations/slack.ts) |
+| Re-arm a ticket on leave | `resetIssue()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts), `deleteBridgeComments()` in [`src/integrations/linear.ts`](src/integrations/linear.ts) |
+| Linear access + comment parsers | [`src/integrations/linear.ts`](src/integrations/linear.ts) |
 | Trigger filters, model, markers, emoji | [`src/config.ts`](src/config.ts) |
-| Webhook signature + bearer-secret auth | [`src/security.ts`](src/security.ts) |
+| Webhook signature + bearer-secret auth | [`src/http/security.ts`](src/http/security.ts) |
 | One-time workspace setup (label + ticket + webhook) | [`scripts/setup-new-workspace.mjs`](scripts/setup-new-workspace.mjs) |
 
 ---

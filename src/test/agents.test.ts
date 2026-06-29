@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { isRunReportable, parseVerifyVerdict, type AgentRunStatus } from "../agents.js";
+import { isRunReportable, parseVerifyVerdict, type AgentRunStatus } from "../pipeline/agents.js";
 
 test("isRunReportable reports a published PR even while the run is still running", () => {
   // The case that left the dashboard's build stage stuck on "running": the cloud

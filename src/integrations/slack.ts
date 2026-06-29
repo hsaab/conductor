@@ -6,7 +6,7 @@
  * Best-effort by design: a missing webhook URL or a transient Slack error never
  * breaks the pipeline, it just logs and moves on.
  */
-import { slackWebhookUrl } from "./config.js";
+import { slackWebhookUrl } from "../config.js";
 
 export interface SlackMessage {
   /** Fallback text and notification summary. */

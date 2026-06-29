@@ -8,8 +8,9 @@
  * per invocation — so during planning the live customer-facing progression is on
  * the Linear ticket (the bridge posts comments as it goes), not `vercel logs`.
  */
-import { cursorKey, deployTargetRepo, ghOwner, maxAgents, plannerModelId } from "./config.js";
-import type { LinearIssuePayload, TestCase } from "./types.js";
+import { cursorKey, deployTargetRepo, ghOwner, maxAgents, plannerModelId } from "../config.js";
+import { oneLineError } from "../shared/errors.js";
+import type { LinearIssuePayload, TestCase } from "../types.js";
 
 /**
  * The kind of work a task represents. The planner classifies each task so the
@@ -313,13 +314,6 @@ function fallbackFleetPlan(issue: LinearIssuePayload, fallbackReason: string): F
   return { tasks: plan, testPlan, usedFallback: true, fallbackReason };
 }
 
-/** Condensed, single-line error text safe to surface in a Linear comment. */
-function errorMessage(err: unknown): string {
-  const raw = err instanceof Error ? err.message || err.name : String(err);
-  const oneLine = raw.replace(/\s+/g, " ").trim();
-  return oneLine.length > 200 ? `${oneLine.slice(0, 197)}…` : oneLine;
-}
-
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -378,7 +372,7 @@ async function runPlannerOnce(issue: LinearIssuePayload, apiKey: string): Promis
     }
     return { ok: false, reason: `planner run ${result.status}`, transient: true };
   } catch (err) {
-    return { ok: false, reason: `planner startup failed: ${errorMessage(err)}`, transient: true };
+    return { ok: false, reason: `planner startup failed: ${oneLineError(err, 200)}`, transient: true };
   }
 }
 

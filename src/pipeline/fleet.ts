@@ -2,7 +2,7 @@
  * Fleet orchestration: planning tasks from the ticket, launching agents (without
  * blocking on completion), and reconciling finished runs back into Linear.
  */
-import { markers, observeWindowMs, triggerLabel, triggerState } from "./config.js";
+import { markers, observeWindowMs, triggerLabel, triggerState } from "../config.js";
 import {
   checkAgentRun,
   isRunReportable,
@@ -14,7 +14,7 @@ import {
   type AgentRunStatus,
 } from "./agents.js";
 import { parseEvents } from "./events.js";
-import { allPullRequestsMerged } from "./github.js";
+import { allPullRequestsMerged } from "../integrations/github.js";
 import {
   addIssueReaction,
   deleteBridgeComments,
@@ -29,15 +29,15 @@ import {
   parseRemediationDoneIds,
   parseRemediationResults,
   parseSpawnedAgents,
-  parseTestPlan,
   parseVerifyAgents,
   hasVerifyFail,
   hasVerifyPass,
   postComment,
   removeIssueReaction,
-} from "./linear.js";
+} from "../integrations/linear.js";
 import { planFleet, type PlannedTask } from "./planner.js";
-import { postSlack, statusBlocks } from "./slack.js";
+import { postSlack, statusBlocks } from "../integrations/slack.js";
+import { repoShortName } from "../shared/repo.js";
 import type {
   JobAgent,
   JobSummary,
@@ -47,7 +47,7 @@ import type {
   StageState,
   TestCase,
   TriggerResult,
-} from "./types.js";
+} from "../types.js";
 
 /** Best-effort, per-instance guard against double-spawning while a trigger is in flight. */
 const activeIssues = new Set<string>();
@@ -55,10 +55,6 @@ const activeIssues = new Set<string>();
 export function shouldSpawn(issue: LinearIssuePayload): boolean {
   const labels = issue.labels?.map((l) => l.name) ?? [];
   return labels.includes(triggerLabel) && issue.state?.name === triggerState;
-}
-
-function repoShortName(repo: string): string {
-  return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
 }
 
 function planTaskList(tasks: PlannedTask[]): string {
@@ -437,6 +433,16 @@ ${prLine}`;
 }
 
 /**
+ * Comment body confirming the build PR(s) merged (review/merge stage done).
+ * Shared by the reconciler and the Vercel deploy webhook, which can each be the
+ * first to observe the merge, so both write the identical `merged` marker.
+ */
+export function mergedComment(prUrls: string[]): string {
+  const count = prUrls.length === 1 ? "1 pull request" : `${prUrls.length} pull requests`;
+  return `${markers.merged}\n**🔀 Merged** — ${count} merged to the default branch.\n${prUrls.join("\n")}`;
+}
+
+/**
  * Reconciles a single issue's remediation agents (the post-alert track), posting
  * their hotfix PR back to Linear and Slack. Kept separate from the build-agent
  * loop so remediation never affects build/review stage derivation.
@@ -551,11 +557,7 @@ async function reconcileMerge(
   }
   if (!merged) return;
 
-  const count = prUrls.length === 1 ? "1 pull request" : `${prUrls.length} pull requests`;
-  await postComment(
-    issue.id,
-    `${markers.merged}\n**🔀 Merged** — ${count} merged to the default branch.\n${prUrls.join("\n")}`,
-  );
+  await postComment(issue.id, mergedComment(prUrls));
   console.log(`[merge] ${issue.identifier} PR(s) merged → review/merge complete`);
 }
 

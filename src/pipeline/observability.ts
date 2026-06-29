@@ -11,14 +11,14 @@
  * deterministic. The remediation stage, which writes code, is a real cloud agent
  * (see remediation.ts).
  */
-import { deployTargetRepo, githubToken, markers, observeWindowMs, productionDeployHostname } from "./config.js";
-import { checkServiceHealth, datadogServiceUrl, type ServiceHealth } from "./datadog.js";
+import { deployTargetRepo, githubToken, markers, observeWindowMs, productionDeployHostname } from "../config.js";
+import { checkServiceHealth, datadogServiceUrl, type ServiceHealth } from "../integrations/datadog.js";
 import { spawnVerifyAgent } from "./agents.js";
-import { findActiveFleet, summarizeJob } from "./fleet.js";
-import { allPullRequestsMerged } from "./github.js";
-import { hasComment, parseTestPlan, parseVerifyAgents, postComment } from "./linear.js";
-import { postSlack, statusBlocks } from "./slack.js";
-import type { LinearIssuePayload } from "./types.js";
+import { findActiveFleet, mergedComment, summarizeJob } from "./fleet.js";
+import { allPullRequestsMerged } from "../integrations/github.js";
+import { hasComment, parseTestPlan, parseVerifyAgents, postComment } from "../integrations/linear.js";
+import { postSlack, statusBlocks } from "../integrations/slack.js";
+import type { LinearIssuePayload } from "../types.js";
 
 export interface DeploymentInfo {
   project: string;
@@ -190,11 +190,7 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
     }
     // The deploy webhook can beat the reconciler's merge check; record the confirmed
     // merge here so the dashboard's review/merge stages advance in lockstep.
-    const count = prUrls.length === 1 ? "1 pull request" : `${prUrls.length} pull requests`;
-    await postComment(
-      issue.id,
-      `${markers.merged}\n**🔀 Merged** — ${count} merged to the default branch.\n${prUrls.join("\n")}`,
-    );
+    await postComment(issue.id, mergedComment(prUrls));
   }
 
   const shortSha = dep.commitSha?.slice(0, 7);

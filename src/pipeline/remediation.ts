@@ -6,11 +6,11 @@
  * review, closing the circle.
  */
 import { spawnRemediationAgent, type RemediationAlert } from "./agents.js";
-import { deployTargetRepo, markers } from "./config.js";
-import { datadogServiceUrl } from "./datadog.js";
+import { deployTargetRepo, markers } from "../config.js";
+import { datadogServiceUrl } from "../integrations/datadog.js";
 import { findActiveFleet } from "./fleet.js";
-import { hasComment } from "./linear.js";
-import { postSlack, statusBlocks } from "./slack.js";
+import { hasComment } from "../integrations/linear.js";
+import { postSlack, statusBlocks } from "../integrations/slack.js";
 
 /** Datadog recovery/success notifications should not trigger remediation. */
 function isRecovery(alertType: string | undefined): boolean {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createBoardCache } from "../boardCache.js";
+import { createBoardCache } from "../http/boardCache.js";
 import type { JobsReport } from "../types.js";
 
 const emptyReport = (): JobsReport => ({
