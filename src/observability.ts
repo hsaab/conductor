@@ -11,7 +11,7 @@
  * deterministic. The remediation stage, which writes code, is a real cloud agent
  * (see remediation.ts).
  */
-import { deployTargetRepo, githubToken, markers, observeWindowMs } from "./config.js";
+import { deployTargetRepo, githubToken, markers, observeWindowMs, productionDeployHostname } from "./config.js";
 import { checkServiceHealth, datadogServiceUrl, type ServiceHealth } from "./datadog.js";
 import { findActiveFleet, summarizeJob } from "./fleet.js";
 import { allPullRequestsMerged } from "./github.js";
@@ -25,6 +25,48 @@ export interface DeploymentInfo {
   target?: string;
   commitSha?: string;
   commitMessage?: string;
+  /** Git branch from deployment metadata, when present (preview deploys). */
+  gitBranch?: string;
+}
+
+function hostnameFromUrl(url: string): string {
+  const normalized = url.startsWith("http") ? url : `https://${url}`;
+  return new URL(normalized).hostname.toLowerCase();
+}
+
+/**
+ * Vercel preview deployments use hashed deployment URLs or branch aliases —
+ * never the stable production alias.
+ */
+export function isPreviewDeployUrl(url?: string): boolean {
+  if (!url) return false;
+  try {
+    const host = hostnameFromUrl(url);
+    if (/-[a-z0-9]+-[a-z0-9-]+-projects\.vercel\.app$/i.test(host)) return true;
+    if (/-git-[a-z0-9-]+\.vercel\.app$/i.test(host)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True only for deploys that actually hit production. Vercel sends `target: null`
+ * for previews; treating "missing target" as production caused PR preview URLs
+ * to announce "shipped to production".
+ */
+export function isProductionDeployment(dep: DeploymentInfo): boolean {
+  const target = dep.target?.toLowerCase();
+  if (target && target !== "production") return false;
+  if (isPreviewDeployUrl(dep.url)) return false;
+
+  if (target === "production") return true;
+
+  const prodHost = productionDeployHostname();
+  if (prodHost && dep.url) return hostnameFromUrl(dep.url) === prodHost;
+
+  // Legacy: null target with a non-preview URL and no canonical prod host configured.
+  return !target && Boolean(dep.url);
 }
 
 /** Tolerantly extracts deployment fields from the varied Vercel webhook shapes. */
@@ -35,12 +77,14 @@ export function extractDeployment(body: any): DeploymentInfo | null {
   if (!project) return null;
   const meta = deployment.meta ?? p.meta ?? {};
   const rawUrl = p.url ?? deployment.url;
+  const rawTarget = p.target ?? deployment.target;
   return {
     project: String(project),
     url: rawUrl ? (String(rawUrl).startsWith("http") ? String(rawUrl) : `https://${rawUrl}`) : undefined,
-    target: p.target ?? deployment.target ?? undefined,
+    target: rawTarget == null ? undefined : String(rawTarget),
     commitSha: meta.githubCommitSha ?? meta.gitCommitSha ?? undefined,
     commitMessage: meta.githubCommitMessage ?? meta.gitCommitMessage ?? undefined,
+    gitBranch: meta.githubCommitRef ?? meta.gitCommitRef ?? undefined,
   };
 }
 
@@ -67,23 +111,35 @@ export interface DeployAnnouncement {
   observeNote: string;
 }
 
+export interface DeployAnnouncementOptions {
+  /** When false, copy reflects an unmatched production deploy, not a fleet ship. */
+  matchedTicket?: boolean;
+}
+
 export function buildDeployAnnouncement(
   project: string,
   health: ServiceHealth,
   windowMin: number,
+  options: DeployAnnouncementOptions = {},
 ): DeployAnnouncement {
+  const matchedTicket = options.matchedTicket !== false;
   const errors = health.unknown ? 0 : health.errors ?? 0;
+  const shipped = matchedTicket ? "shipped to production" : "production deploy detected";
   if (errors > 0) {
     const count = `${errors} error log${errors === 1 ? "" : "s"}`;
     return {
-      headline: `⚠️ ${project} shipped with errors already in production`,
+      headline: matchedTicket
+        ? `⚠️ ${project} shipped with errors already in production`
+        : `⚠️ ${project} production deploy — ${count} already in logs`,
       scanLine: `Scanning: ⚠️ ${count} already in production (last 10 min)`,
       observeNote: `⚠️ ${count} already present. `,
     };
   }
   return {
-    headline: `🚀 ${project} shipped to production`,
-    scanLine: `Scanning: 🔭 watching production logs and errors for ${windowMin} min`,
+    headline: matchedTicket ? `🚀 ${project} shipped to production` : `📦 ${project} ${shipped}`,
+    scanLine: matchedTicket
+      ? `Scanning: 🔭 watching production logs and errors for ${windowMin} min`
+      : `Note: no active fleet ticket matched this deploy`,
     observeNote: "",
   };
 }
@@ -103,8 +159,9 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
   const dep = extractDeployment(body);
   if (!dep) return { handled: false, reason: "could not parse deployment payload" };
   if (!matchesTarget(dep.project)) return { handled: false, reason: `ignoring project ${dep.project}` };
-  if (dep.target && dep.target !== "production") {
-    return { handled: false, reason: `ignoring ${dep.target} deploy` };
+  if (!isProductionDeployment(dep)) {
+    const kind = dep.target ?? (isPreviewDeployUrl(dep.url) ? "preview" : "non-production");
+    return { handled: false, reason: `ignoring ${kind} deploy` };
   }
 
   // Advance the dashboard: mark the in-flight fleet (build done, not yet deployed)
@@ -150,13 +207,17 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
   // produced later, when the observe window closes (see reconcileObserve).
   const windowMin = Math.round(observeWindowMs() / 60_000);
   const health = await checkServiceHealth(deployTargetRepo);
-  const { headline, scanLine, observeNote } = buildDeployAnnouncement(dep.project, health, windowMin);
+  const prodHost = productionDeployHostname();
+  const { headline, scanLine, observeNote } = buildDeployAnnouncement(dep.project, health, windowMin, {
+    matchedTicket: Boolean(issue),
+  });
   const lines = [
-    issue ? `Ticket: ${issue.identifier} — ${issue.title}` : "Ticket: (unmatched)",
+    issue ? `Ticket: ${issue.identifier} — ${issue.title}` : "Ticket: none — no active fleet matched",
     dep.url ? `Deploy: ${dep.url}` : "",
+    prodHost ? `Production: https://${prodHost}` : "",
     shortSha ? `Commit: ${shortSha}${dep.commitMessage ? ` — ${dep.commitMessage.split("\n")[0]}` : ""}` : "",
     scanLine,
-    `Dashboard: ${datadogServiceUrl(deployTargetRepo)}`,
+    issue ? `Dashboard: ${datadogServiceUrl(deployTargetRepo)}` : "",
   ].filter(Boolean);
 
   await postSlack(statusBlocks(headline, lines));

@@ -27,6 +27,22 @@ export const ghOwner = envOr(process.env.GH_OWNER, "hsaab");
 export const deployTargetRepo = envOr(process.env.DEPLOY_TARGET_REPO, "compound");
 
 /**
+ * Canonical production hostname for the deploy target (no scheme/path), used to
+ * distinguish real production deploys from Vercel preview URLs when the webhook
+ * omits `target`. Set `PRODUCTION_DEPLOY_URL` or `COMPOUND_URL`.
+ */
+export const productionDeployHostname = (): string => {
+  const raw = envOr(process.env.PRODUCTION_DEPLOY_URL, process.env.COMPOUND_URL ?? "");
+  if (!raw) return "";
+  try {
+    const withScheme = raw.startsWith("http") ? raw : `https://${raw}`;
+    return new URL(withScheme).hostname.toLowerCase();
+  } catch {
+    return raw.replace(/^https?:\/\//, "").split("/")[0]?.toLowerCase() ?? "";
+  }
+};
+
+/**
  * GitHub token used only to read pull-request merge status so the review/merge
  * stages advance on the real merge (target repos are private). Optional: without
  * it, conductor falls back to treating a successful deploy as proof of merge.
