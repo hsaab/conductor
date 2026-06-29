@@ -8,7 +8,7 @@
  * `"unknown"`, and callers treat anything other than a definite merge as
  * not-yet-merged — so an outage never falsely advances a stage.
  */
-import { githubToken } from "./config.js";
+import { githubToken } from "../config.js";
 
 /** Owner / repo / PR number parsed from a GitHub pull-request URL. */
 export interface PullRequestRef {

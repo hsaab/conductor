@@ -6,14 +6,14 @@
  * parsers turn a fetched issue's comments back into structured agent records.
  */
 import crypto from "node:crypto";
-import { linearKey, markers, reactionEmoji } from "./config.js";
+import { linearKey, markers, reactionEmoji } from "../config.js";
 import type {
   LinearConnection,
   LinearIssuePayload,
   LinearIssueRecord,
   SpawnedAgent,
   TestCase,
-} from "./types.js";
+} from "../types.js";
 
 const AGENT_ID_RE = /Agent ID:\s*`(bc-[0-9a-zA-Z_-]+)`/;
 const REPO_RE = /Repo:\s*`([^`]+)`/;
@@ -115,19 +115,26 @@ export function issueRefFromBody(body: unknown): string | undefined {
   return typeof ref === "string" && ref.trim().length > 0 ? ref.trim() : undefined;
 }
 
+const PR_URL_RE = /PR:\s*(https?:\/\/[^\s)]+)/i;
+const DONE_ID_RE = /conductor:agent-done id=(bc-[0-9a-zA-Z_-]+)/;
+
 /**
- * Recovers the agents spawned for an issue by parsing its "agent spawned"
- * comments. Reading the human-readable comment (rather than a side channel)
- * means even agents spawned by older bridge versions remain reconcilable.
- * Duplicate agent ids are collapsed.
+ * Scans an issue's comments for spawned-agent records, recovering each agent's id
+ * via `extractId` and its repo from the shared `Repo:` line; duplicate ids are
+ * collapsed. The three agent tracks (build, verify, remediation) differ only in
+ * how the id is recovered from a comment, so they share this loop. Reading the
+ * human-readable comments (not a side channel) keeps even agents spawned by older
+ * bridge versions reconcilable.
  */
-export function parseSpawnedAgents(issue: LinearIssuePayload): SpawnedAgent[] {
+function parseAgentsBy(
+  issue: LinearIssuePayload,
+  extractId: (body: string) => string | undefined,
+): SpawnedAgent[] {
   const seen = new Set<string>();
   const agents: SpawnedAgent[] = [];
   for (const comment of issue.comments ?? []) {
     const body = comment.body ?? "";
-    if (!/agent spawned/i.test(body)) continue;
-    const agentId = body.match(AGENT_ID_RE)?.[1];
+    const agentId = extractId(body);
     const repo = body.match(REPO_RE)?.[1];
     if (!agentId || !repo || seen.has(agentId)) continue;
     seen.add(agentId);
@@ -136,28 +143,48 @@ export function parseSpawnedAgents(issue: LinearIssuePayload): SpawnedAgent[] {
   return agents;
 }
 
-/** Agent ids that already have a completion comment (keeps reconcile idempotent). */
-export function parseDoneAgentIds(issue: LinearIssuePayload): Set<string> {
+/** Collects every agent id captured by a global `done`-marker regex across an issue's comments. */
+function parseDoneIds(issue: LinearIssuePayload, doneRe: RegExp): Set<string> {
   const ids = new Set<string>();
   for (const comment of issue.comments ?? []) {
-    for (const match of (comment.body ?? "").matchAll(DONE_MARKER_RE)) ids.add(match[1]);
+    for (const match of (comment.body ?? "").matchAll(doneRe)) ids.add(match[1]);
   }
   return ids;
 }
 
-const PR_URL_RE = /PR:\s*(https?:\/\/[^\s)]+)/i;
-const DONE_ID_RE = /conductor:agent-done id=(bc-[0-9a-zA-Z_-]+)/;
-
-/** Maps each completed agent id to the PR URL parsed from its completion comment. */
-export function parseAgentResults(issue: LinearIssuePayload): Map<string, { prUrl?: string }> {
+/** Maps each completed agent id (captured by `idRe`) to the PR URL in its completion comment. */
+function parseResults(issue: LinearIssuePayload, idRe: RegExp): Map<string, { prUrl?: string }> {
   const results = new Map<string, { prUrl?: string }>();
   for (const comment of issue.comments ?? []) {
     const body = comment.body ?? "";
-    const id = body.match(DONE_ID_RE)?.[1];
+    const id = body.match(idRe)?.[1];
     if (!id) continue;
     results.set(id, { prUrl: body.match(PR_URL_RE)?.[1] });
   }
   return results;
+}
+
+/**
+ * Recovers the build agents spawned for an issue from its "agent spawned"
+ * comments. Build spawns carry no hidden id marker, so the id is read from the
+ * visible `Agent ID:` line, gated on the "agent spawned" headline so completion
+ * and remediation/verify comments (which also carry an `Agent ID:` line) are
+ * never mistaken for build spawns.
+ */
+export function parseSpawnedAgents(issue: LinearIssuePayload): SpawnedAgent[] {
+  return parseAgentsBy(issue, (body) =>
+    /agent spawned/i.test(body) ? body.match(AGENT_ID_RE)?.[1] : undefined,
+  );
+}
+
+/** Agent ids that already have a completion comment (keeps reconcile idempotent). */
+export function parseDoneAgentIds(issue: LinearIssuePayload): Set<string> {
+  return parseDoneIds(issue, DONE_MARKER_RE);
+}
+
+/** Maps each completed build agent id to the PR URL parsed from its completion comment. */
+export function parseAgentResults(issue: LinearIssuePayload): Map<string, { prUrl?: string }> {
+  return parseResults(issue, DONE_ID_RE);
 }
 
 /**
@@ -179,38 +206,17 @@ const REMEDIATION_DONE_ID_RE = /conductor:remediation-done id=(bc-[0-9a-zA-Z_-]+
 
 /** Remediation agents dispatched for an issue (tracked separately from build agents). */
 export function parseRemediationAgents(issue: LinearIssuePayload): SpawnedAgent[] {
-  const seen = new Set<string>();
-  const agents: SpawnedAgent[] = [];
-  for (const comment of issue.comments ?? []) {
-    const body = comment.body ?? "";
-    const agentId = body.match(REMEDIATION_SPAWN_RE)?.[1];
-    const repo = body.match(REPO_RE)?.[1];
-    if (!agentId || !repo || seen.has(agentId)) continue;
-    seen.add(agentId);
-    agents.push({ agentId, repo });
-  }
-  return agents;
+  return parseAgentsBy(issue, (body) => body.match(REMEDIATION_SPAWN_RE)?.[1]);
 }
 
 /** Remediation agent ids that already reported a hotfix PR. */
 export function parseRemediationDoneIds(issue: LinearIssuePayload): Set<string> {
-  const ids = new Set<string>();
-  for (const comment of issue.comments ?? []) {
-    for (const match of (comment.body ?? "").matchAll(REMEDIATION_DONE_RE)) ids.add(match[1]);
-  }
-  return ids;
+  return parseDoneIds(issue, REMEDIATION_DONE_RE);
 }
 
 /** Maps each completed remediation agent id to its hotfix PR URL. */
 export function parseRemediationResults(issue: LinearIssuePayload): Map<string, { prUrl?: string }> {
-  const results = new Map<string, { prUrl?: string }>();
-  for (const comment of issue.comments ?? []) {
-    const body = comment.body ?? "";
-    const id = body.match(REMEDIATION_DONE_ID_RE)?.[1];
-    if (!id) continue;
-    results.set(id, { prUrl: body.match(PR_URL_RE)?.[1] });
-  }
-  return results;
+  return parseResults(issue, REMEDIATION_DONE_ID_RE);
 }
 
 /** True when any remediation agent has reported a hotfix PR. */
@@ -222,17 +228,7 @@ const VERIFY_SPAWN_RE = /conductor:verify-agent id=(bc-[0-9a-zA-Z_-]+)/;
 
 /** Verify agents dispatched for an issue (tracked separately from build/remediation). */
 export function parseVerifyAgents(issue: LinearIssuePayload): SpawnedAgent[] {
-  const seen = new Set<string>();
-  const agents: SpawnedAgent[] = [];
-  for (const comment of issue.comments ?? []) {
-    const body = comment.body ?? "";
-    const agentId = body.match(VERIFY_SPAWN_RE)?.[1];
-    const repo = body.match(REPO_RE)?.[1];
-    if (!agentId || !repo || seen.has(agentId)) continue;
-    seen.add(agentId);
-    agents.push({ agentId, repo });
-  }
-  return agents;
+  return parseAgentsBy(issue, (body) => body.match(VERIFY_SPAWN_RE)?.[1]);
 }
 
 /** Parses the test plan JSON embedded in a test-plan comment (fenced block). */

@@ -11,7 +11,7 @@
  * State is per serverless instance (best-effort): a cold start just repopulates
  * from Linear on the next read, so the cache is never a source of truth.
  */
-import type { JobsReport } from "./types.js";
+import type { JobsReport } from "../types.js";
 
 type BoardFetcher = (options: { includeComplete: boolean }) => Promise<JobsReport>;
 

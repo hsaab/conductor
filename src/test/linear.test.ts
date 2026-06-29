@@ -16,7 +16,7 @@ import {
   parseDoneAgentIds,
   parseSpawnedAgents,
   parseTestPlan,
-} from "../linear.js";
+} from "../integrations/linear.js";
 import { markers } from "../config.js";
 import type { LinearIssuePayload } from "../types.js";
 

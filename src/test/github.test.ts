@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { allPullRequestsMerged, fetchPullRequestMergeState, parsePullRequestUrl } from "../github.js";
+import { allPullRequestsMerged, fetchPullRequestMergeState, parsePullRequestUrl } from "../integrations/github.js";
 
 test("parsePullRequestUrl extracts owner, repo, and number from a PR URL", () => {
   assert.deepEqual(parsePullRequestUrl("https://github.com/hsaab/compound/pull/52"), {

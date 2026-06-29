@@ -13,7 +13,7 @@ import {
   sanitizeTestPlan,
   withTicketRepos,
   type PlannerAttempt,
-} from "../planner.js";
+} from "../pipeline/planner.js";
 import type { LinearIssuePayload } from "../types.js";
 
 /** Test helper: an attempt fn that yields the queued outcomes in order, counting calls + delays. */

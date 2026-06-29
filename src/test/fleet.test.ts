@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { jobNeedsReconcile, verifyWindowElapsed, selectActiveFleet, summarizeJob } from "../fleet.js";
+import { jobNeedsReconcile, verifyWindowElapsed, selectActiveFleet, summarizeJob } from "../pipeline/fleet.js";
 import { markers } from "../config.js";
 import type { JobSummary, LinearIssuePayload } from "../types.js";
 

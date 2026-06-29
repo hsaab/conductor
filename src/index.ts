@@ -26,19 +26,19 @@ import { waitUntil } from "@vercel/functions";
 type Req = any;
 type Res = any;
 import { markers, triggerLabel, triggerState } from "./config.js";
-import { dashboardHtml } from "./dashboard.js";
-import { fetchIssue, hasComment, issueRefFromBody, normalizeIssue } from "./linear.js";
-import { createBoardCache } from "./boardCache.js";
-import { listJobs, reconcileAll, reconcileTick, resetIssue, shouldSpawn, triggerFleet } from "./fleet.js";
-import { handleVercelDeployment } from "./observability.js";
-import { handleDatadogAlert } from "./remediation.js";
+import { dashboardHtml } from "./http/dashboard.js";
+import { fetchIssue, hasComment, issueRefFromBody, normalizeIssue } from "./integrations/linear.js";
+import { createBoardCache } from "./http/boardCache.js";
+import { listJobs, reconcileAll, reconcileTick, resetIssue, shouldSpawn, triggerFleet } from "./pipeline/fleet.js";
+import { handleVercelDeployment } from "./pipeline/observability.js";
+import { handleDatadogAlert } from "./pipeline/remediation.js";
 import {
   isAuthorizedDatadog,
   isAuthorizedReconcile,
   isAuthorizedTrigger,
   isAuthorizedVercel,
   verifyLinearSignature,
-} from "./security.js";
+} from "./http/security.js";
 import type { LinearIssuePayload } from "./types.js";
 
 /** Best-effort, per-instance dedupe of webhook redeliveries. */

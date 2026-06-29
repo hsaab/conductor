@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { extractAlert, isDispatchableAlert, shouldDispatchToFleet } from "../remediation.js";
+import { extractAlert, isDispatchableAlert, shouldDispatchToFleet } from "../pipeline/remediation.js";
 
 /** Mirrors the custom payload Datadog sends (scripts/setup-datadog.mjs). */
 const realDatadogPayload = {

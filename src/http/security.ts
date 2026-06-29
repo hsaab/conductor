@@ -6,7 +6,7 @@ import {
   triggerSecret,
   vercelWebhookSecret,
   webhookSecret,
-} from "./config.js";
+} from "../config.js";
 
 /**
  * Minimal request shape these guards need. Avoids importing express's types,

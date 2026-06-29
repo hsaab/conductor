@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseEvents } from "../events.js";
+import { parseEvents } from "../pipeline/events.js";
 import { markers } from "../config.js";
 import type { LinearIssuePayload } from "../types.js";
 

@@ -3,10 +3,12 @@
  * recovering a previously-spawned agent's latest run for the reconciler.
  */
 
-import { cursorKey, deployTargetRepo, ghOwner, markers, modelId } from "./config.js";
-import { postComment } from "./linear.js";
+import { cursorKey, deployTargetRepo, ghOwner, markers, modelId } from "../config.js";
+import { postComment } from "../integrations/linear.js";
+import { oneLineError } from "../shared/errors.js";
+import { repoShortName } from "../shared/repo.js";
 import type { PlannedTask } from "./planner.js";
-import type { LinearIssuePayload, TestCase } from "./types.js";
+import type { LinearIssuePayload, TestCase } from "../types.js";
 
 /**
  * Maps a task kind to the compound skill and workflow emphasis the fleet agent
@@ -38,25 +40,6 @@ function skillGuidance(kind: PlannedTask["kind"]): string {
 function buildPrompt(issue: LinearIssuePayload, task: PlannedTask): string {
   const ticket = `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? ""}`;
   return `${ticket}\n\n## Repo: ${task.repo}\n\n${skillGuidance(task.kind)}\n\n${task.instructions}\n\nOpen a PR when done.`;
-}
-
-function repoShortName(repo: string): string {
-  return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
-}
-
-/**
- * Condensed, single-line failure text for a spawn error.
- *
- * Works whether the error is a `CursorAgentError` (the SDK's typed startup
- * failure) or a raw throw — notably an `@cursor/sdk` import failure when its
- * native `sqlite3` binding is missing on the deploy target. Avoiding a direct
- * `CursorAgentError` reference keeps this usable even when the SDK import itself
- * is what failed.
- */
-function formatAgentError(err: unknown): string {
-  const raw = err instanceof Error ? err.message || err.name : String(err);
-  const oneLine = raw.replace(/\s+/g, " ").trim();
-  return oneLine.length > 300 ? `${oneLine.slice(0, 297)}…` : oneLine;
 }
 
 /**
@@ -97,7 +80,7 @@ export async function spawnAgent(task: PlannedTask, issue: LinearIssuePayload): 
       `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`${agent.agentId}\`\nRepo: \`${task.repo}\``,
     );
   } catch (err) {
-    const msg = formatAgentError(err);
+    const msg = oneLineError(err);
     console.error(`[${name}] Failed to start on ${task.repo}: ${msg}`);
     await postComment(issue.id, `${markers.bridge}\n**Cursor agent failed to start**\n\nRepo: \`${task.repo}\`\n\n${msg}`);
   }
@@ -172,7 +155,7 @@ Repo: \`${repo}\``,
     );
     return agent.agentId;
   } catch (err) {
-    const msg = formatAgentError(err);
+    const msg = oneLineError(err);
     console.error(`[verify] Failed to start on ${repo}: ${msg}`);
     await postComment(
       input.issue.id,
@@ -276,7 +259,7 @@ export async function spawnRemediationAgent(alert: RemediationAlert): Promise<st
     }
     return agent.agentId;
   } catch (err) {
-    const msg = formatAgentError(err);
+    const msg = oneLineError(err);
     console.error(`[remediation] Failed to start on ${repo}: ${msg}`);
     if (alert.issue) {
       await postComment(alert.issue.id, `${markers.bridge}\n**Remediation agent failed to start**\n\n${msg}`);
