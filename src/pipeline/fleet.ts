@@ -36,7 +36,7 @@ import {
   removeIssueReaction,
 } from "../integrations/linear.js";
 import { planFleet, type PlannedTask } from "./planner.js";
-import { postSlack, statusBlocks } from "../integrations/slack.js";
+import { postSlack, statusBlocks, type SlackMessage } from "../integrations/slack.js";
 import { repoShortName } from "../shared/repo.js";
 import type {
   JobAgent,
@@ -74,6 +74,21 @@ ${numbered}
 \`\`\`json
 ${json}
 \`\`\``;
+}
+
+/**
+ * Slack mrkdwn rendering of the full test plan. Mirrors the Linear comment so SQA
+ * sees every case in Slack too, dropping the machine-readable JSON block (that
+ * exists only for the verify agent to parse out of Linear). Slack mrkdwn uses
+ * single-asterisk bold, unlike the double-asterisk Markdown in the Linear comment.
+ */
+export function formatTestPlanSlack(issue: LinearIssuePayload, cases: TestCase[]): SlackMessage {
+  const numbered = cases.map((c, i) => `*${i + 1}. ${c.title}*\n${c.steps}`);
+  return statusBlocks(`📋 ${issue.identifier} — test plan ready for SQA`, [
+    issue.title,
+    `${cases.length} critical check(s), also posted to Linear:`,
+    ...numbered,
+  ]);
 }
 
 function fallbackDetail(reason: string | undefined): string {
@@ -135,12 +150,7 @@ ${planTaskList(plan)}`,
 
     if (testPlan.length > 0) {
       await postComment(issue.id, formatTestPlanComment(testPlan));
-      await postSlack(
-        statusBlocks(`📋 ${issue.identifier} — test plan ready for SQA`, [
-          `${issue.title}`,
-          `${testPlan.length} critical check(s) posted to Linear for review.`,
-        ]),
-      );
+      await postSlack(formatTestPlanSlack(issue, testPlan));
     }
 
     console.log(
