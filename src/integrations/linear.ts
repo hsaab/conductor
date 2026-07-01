@@ -356,13 +356,19 @@ export async function deleteBridgeComments(issueId: string): Promise<number> {
   while (hasNextPage) {
     const data = await fetchIssueCommentsPage(issueId, after);
     const page = data.issue?.comments;
+    const endCursor = page?.pageInfo.endCursor ?? null;
     const bridgeComments = (page?.nodes ?? []).filter((c) => isBridgeComment(c.body));
     for (const comment of bridgeComments) {
       await linearGraphql(`mutation($id: String!) { commentDelete(id: $id) { success } }`, { id: comment.id });
       cleared += 1;
     }
     hasNextPage = page?.pageInfo.hasNextPage ?? false;
-    after = page?.pageInfo.endCursor ?? null;
+    if (bridgeComments.some((c) => c.id === endCursor)) {
+      after = null;
+      if (!hasNextPage) break;
+    } else {
+      after = endCursor;
+    }
   }
   return cleared;
 }
@@ -374,17 +380,14 @@ export async function deleteBridgeComments(issueId: string): Promise<number> {
 export async function deleteAllComments(issueId: string): Promise<number> {
   if (!linearKey()) return 0;
   let cleared = 0;
-  let after: string | null = null;
-  let hasNextPage = true;
-  while (hasNextPage) {
-    const data = await fetchIssueCommentsPage(issueId, after);
-    const page = data.issue?.comments;
-    for (const comment of page?.nodes ?? []) {
+  while (true) {
+    const data = await fetchIssueCommentsPage(issueId, null);
+    const nodes = data.issue?.comments?.nodes ?? [];
+    if (nodes.length === 0) break;
+    for (const comment of nodes) {
       await linearGraphql(`mutation($id: String!) { commentDelete(id: $id) { success } }`, { id: comment.id });
       cleared += 1;
     }
-    hasNextPage = page?.pageInfo.hasNextPage ?? false;
-    after = page?.pageInfo.endCursor ?? null;
   }
   return cleared;
 }
