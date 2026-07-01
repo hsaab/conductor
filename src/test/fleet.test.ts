@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { jobNeedsReconcile, verifyWindowElapsed, selectActiveFleet, summarizeJob } from "../pipeline/fleet.js";
+import {
+  formatTestPlanSlack,
+  jobNeedsReconcile,
+  verifyWindowElapsed,
+  selectActiveFleet,
+  summarizeJob,
+} from "../pipeline/fleet.js";
 import { markers } from "../config.js";
-import type { JobSummary, LinearIssuePayload } from "../types.js";
+import type { JobSummary, LinearIssuePayload, TestCase } from "../types.js";
 
 const NOW = Date.parse("2026-06-02T12:00:00.000Z");
 const compoundSpawn = `${markers.bridge}\n**Cursor agent spawned**\n\nAgent ID: \`bc-aaa-111\`\nRepo: \`hsaab/compound\``;
@@ -355,6 +361,24 @@ test("summarizeJob exposes a chronological activity feed for the dashboard", () 
   assert.equal(job.events[0].stage, "plan");
   assert.equal(job.events[2].message, "Cursor compound agent finished");
   assert.equal(job.events[2].stage, "build");
+});
+
+test("formatTestPlanSlack posts every case (title + steps) to Slack, not just a count", () => {
+  const cases: TestCase[] = [
+    { title: "Footer loads", steps: "Open the page; expect the footer to render." },
+    { title: "Quote refreshes", steps: "Click refresh; expect a new quote within 1s." },
+  ];
+  const msg = formatTestPlanSlack(issue([]), cases);
+
+  assert.match(msg.text, /ENG-9 — test plan ready for SQA/);
+  assert.match(msg.text, /2 critical check\(s\), also posted to Linear/);
+  for (const c of cases) {
+    assert.ok(msg.text.includes(c.title), `missing title: ${c.title}`);
+    assert.ok(msg.text.includes(c.steps), `missing steps: ${c.steps}`);
+  }
+  // Slack mrkdwn bold is single-asterisk, distinct from the Linear comment's `**`.
+  assert.ok(msg.text.includes("*1. Footer loads*"));
+  assert.ok(!msg.text.includes("**"));
 });
 
 test("jobNeedsReconcile is true while build agents are still pending", () => {
