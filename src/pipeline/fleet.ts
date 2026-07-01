@@ -17,6 +17,7 @@ import { parseEvents } from "./events.js";
 import { allPullRequestsMerged } from "../integrations/github.js";
 import {
   addIssueReaction,
+  deleteAllComments,
   deleteBridgeComments,
   hasComment,
   hasStartupFailure,
@@ -167,15 +168,28 @@ ${planTaskList(plan)}`,
   }
 }
 
+export type ResetIssueOptions = { wipeAll?: boolean };
+
 /**
  * Re-arms an issue so a fresh drag into "In Progress" launches a new fleet:
- * removes the bridge's reaction and deletes all of its comments (which clears
- * the `fleetStarted` dedupe marker). Used when a ticket leaves "In Progress".
+ * removes the bridge's reaction and deletes comments (which clears the
+ * `fleetStarted` dedupe marker). Used when a ticket leaves "In Progress".
+ *
+ * When `wipeAll` is true (explicit `/api/reset`), every comment is removed.
+ * Otherwise only conductor-authored comments are deleted.
  */
-export async function resetIssue(issueId: string): Promise<{ clearedComments: number }> {
+export async function resetIssue(
+  issueId: string,
+  opts?: ResetIssueOptions,
+): Promise<{ clearedComments: number }> {
   await removeIssueReaction(issueId);
-  const clearedComments = await deleteBridgeComments(issueId);
-  if (clearedComments > 0) console.log(`[reset] re-armed ${issueId} (cleared ${clearedComments} comment(s))`);
+  const clearedComments = opts?.wipeAll
+    ? await deleteAllComments(issueId)
+    : await deleteBridgeComments(issueId);
+  if (clearedComments > 0) {
+    const scope = opts?.wipeAll ? "all" : "bridge";
+    console.log(`[reset] re-armed ${issueId} (cleared ${clearedComments} ${scope} comment(s))`);
+  }
   return { clearedComments };
 }
 

@@ -5,9 +5,9 @@
  * The demo's state lives in three places; this script resets the two that are
  * safe to mutate programmatically and *verifies/reports* the third:
  *
- *  1. Linear tickets (the state store): for each demo ticket it clears
- *     conductor's comment markers + reaction (via POST /api/reset) and moves
- *     the ticket back to its armed state (Backlog by default).
+ *  1. Linear tickets (the state store): for each demo ticket it deletes ALL
+ *     comments + reaction (via POST /api/reset) and moves the ticket back to its
+ *     armed state (Backlog by default).
  *  2. Conductor: stateless — its state is the Linear comments above, so clearing
  *     those re-arms it. The script then confirms the board (/api/board) is empty.
  *  3. Target app: restoring the fast `quotes-check` baseline requires reverting
@@ -87,7 +87,7 @@ async function resolveIssue(ref) {
 }
 
 /**
- * Clear conductor's markers + reaction for an issue via the bridge. Passing the
+ * Clear all comments + reaction for an issue via the bridge. Passing the
  * canonical UUID (not the identifier) ensures the reaction — whose id derives
  * from the issue UUID — is removed even on conductor builds whose /api/reset
  * does not yet resolve identifiers.

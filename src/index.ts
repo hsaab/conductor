@@ -6,7 +6,7 @@
  *  - GET  /api/health     liveness probe
  *  - GET  /api/board      public read-only fleet status for the dashboard
  *  - POST /api/trigger    secured manual fallback for the Linear webhook
- *  - POST /api/reset      secured re-arm (clears bridge comments + reaction)
+ *  - POST /api/reset      secured re-arm (wipes all comments + reaction)
  *  - GET  /api/reconcile   cron-driven completion sweep (posts PR URLs to Linear)
  *  - POST /webhook/linear  Linear webhook (signature-verified)
  *  - POST /webhook/vercel  Vercel deployment webhook -> verify agent
@@ -176,8 +176,8 @@ app.post("/api/trigger", express.json(), async (req: Req, res: Res) => {
   }
 });
 
-// Re-arms an issue (clears the bridge's comments + reaction) so dragging it
-// back into "In Progress" launches a fresh fleet. Authorized like /api/trigger.
+// Re-arms an issue (wipes all comments + reaction) so dragging it back into
+// "In Progress" launches a fresh fleet. Authorized like /api/trigger.
 app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
   if (!isAuthorizedTrigger(req)) return res.status(401).json({ error: "unauthorized" });
   const issueRef = issueRefFromBody(req.body);
@@ -190,7 +190,7 @@ app.post("/api/reset", express.json(), async (req: Req, res: Res) => {
     // as DEMO_FLOW §7 does) must operate on issue.id to clear the 🚀 reaction.
     const issue = await fetchIssue(issueRef);
     if (!issue) return res.status(404).json({ error: `Linear issue not found: ${issueRef}` });
-    const result = await resetIssue(issue.id);
+    const result = await resetIssue(issue.id, { wipeAll: true });
     return res.status(200).json({ ok: true, identifier: issue.identifier, ...result });
   } catch (err) {
     console.error("[reset] failed:", err);
