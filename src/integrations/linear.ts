@@ -321,19 +321,70 @@ export async function removeIssueReaction(issueId: string): Promise<void> {
   }
 }
 
+type IssueCommentsPage = {
+  issue: {
+    comments: {
+      nodes: Array<{ id: string; body?: string | null }>;
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+    };
+  } | null;
+};
+
+const ISSUE_COMMENTS_PAGE = `query($id: String!, $after: String) {
+  issue(id: $id) {
+    comments(first: 100, after: $after) {
+      nodes { id body }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}`;
+
+/** Fetches one page of comments for an issue. */
+async function fetchIssueCommentsPage(issueId: string, after?: string | null): Promise<IssueCommentsPage> {
+  return linearGraphql<IssueCommentsPage>(ISSUE_COMMENTS_PAGE, { id: issueId, after: after ?? null });
+}
+
 /**
  * Deletes every bridge-authored comment on an issue, re-arming it so a fresh
  * drag into "In Progress" launches a new fleet. Returns the number removed.
  */
 export async function deleteBridgeComments(issueId: string): Promise<number> {
   if (!linearKey()) return 0;
-  const data = await linearGraphql<{ issue: { comments: { nodes: Array<{ id: string; body?: string | null }> } } | null }>(
-    `query($id: String!) { issue(id: $id) { comments(first: 100) { nodes { id body } } } }`,
-    { id: issueId },
-  );
-  const bridgeComments = (data.issue?.comments.nodes ?? []).filter((c) => isBridgeComment(c.body));
-  for (const comment of bridgeComments) {
-    await linearGraphql(`mutation($id: String!) { commentDelete(id: $id) { success } }`, { id: comment.id });
+  let cleared = 0;
+  let after: string | null = null;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const data = await fetchIssueCommentsPage(issueId, after);
+    const page = data.issue?.comments;
+    const bridgeComments = (page?.nodes ?? []).filter((c) => isBridgeComment(c.body));
+    for (const comment of bridgeComments) {
+      await linearGraphql(`mutation($id: String!) { commentDelete(id: $id) { success } }`, { id: comment.id });
+      cleared += 1;
+    }
+    hasNextPage = page?.pageInfo.hasNextPage ?? false;
+    after = page?.pageInfo.endCursor ?? null;
   }
-  return bridgeComments.length;
+  return cleared;
+}
+
+/**
+ * Deletes every comment on an issue (demo reset). Paginates so tickets with
+ * more than 100 comments are fully cleared. Returns the number removed.
+ */
+export async function deleteAllComments(issueId: string): Promise<number> {
+  if (!linearKey()) return 0;
+  let cleared = 0;
+  let after: string | null = null;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const data = await fetchIssueCommentsPage(issueId, after);
+    const page = data.issue?.comments;
+    for (const comment of page?.nodes ?? []) {
+      await linearGraphql(`mutation($id: String!) { commentDelete(id: $id) { success } }`, { id: comment.id });
+      cleared += 1;
+    }
+    hasNextPage = page?.pageInfo.hasNextPage ?? false;
+    after = page?.pageInfo.endCursor ?? null;
+  }
+  return cleared;
 }

@@ -300,7 +300,9 @@ provide real, recent artifacts. Keep the reconcile loop (5.1) running throughout
 
 ## 7. Reset / re-arm between rehearsals
 
-Re-arming clears conductor's comments + 🚀 reaction so a fresh drag relaunches a fleet.
+Re-arming via `/api/reset` wipes **all** comments + the 🚀 reaction so a fresh
+drag relaunches a fleet. (Dragging a ticket out of "In Progress" only clears
+conductor-authored comments.)
 ```bash
 for T in FE-5 FE-7 FE-13; do
   curl -s -X POST "$BRIDGE_URL/api/reset" -H "Authorization: Bearer $BRIDGE_TRIGGER_SECRET" \

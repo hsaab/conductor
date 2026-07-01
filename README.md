@@ -90,7 +90,7 @@ in Linear comment markers:
 | `GET /api/health` | Liveness probe |
 | `GET /api/board` | Public read-only dashboard data, reconstructed from Linear comments |
 | `POST /api/trigger` | Secured manual fallback for the Linear webhook |
-| `POST /api/reset` | Secured re-arm (clears conductor comments + reaction) |
+| `POST /api/reset` | Secured re-arm (wipes all comments + reaction) |
 | `GET\|POST /api/reconcile` | Cron-driven and manual completion sweep |
 | `POST /webhook/linear` | Linear webhook (HMAC verified) |
 | `POST /webhook/vercel` | Vercel deployment webhook (shared-secret) |
@@ -211,7 +211,7 @@ curl -X POST "$BRIDGE_URL/api/reconcile" \
   -H "authorization: Bearer $BRIDGE_TRIGGER_SECRET"
 ```
 
-Manual reset (re-arm an issue by removing the reaction and deleting conductor comments):
+Manual reset (re-arm an issue by removing the reaction and deleting all comments):
 
 ```bash
 curl -X POST "$BRIDGE_URL/api/reset" \

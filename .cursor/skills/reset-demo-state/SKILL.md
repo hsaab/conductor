@@ -1,6 +1,6 @@
 ---
 name: reset-demo-state
-description: Reset the conductor closed-loop demo back to a clean, armed starting state across all three surfaces — Linear tickets (clear conductor markers + reaction, move back to Backlog), conductor (verify the board is empty), and the target app (verify the fast quotes-check baseline). Use when the user says reset the demo, reset demo state, re-arm the demo, clean slate for the conductor loop, reset the tickets, or start the demo from scratch. This is distinct from the target-app repo's own reset-demo skill, which wipes a just-built feature.
+description: Reset the conductor closed-loop demo back to a clean, armed starting state across all three surfaces — Linear tickets (delete ALL comments + reaction, move back to Backlog), conductor (verify the board is empty), and the target app (verify the fast quotes-check baseline). Use when the user says reset the demo, reset demo state, re-arm the demo, clean slate for the conductor loop, reset the tickets, or start the demo from scratch. This is distinct from the target-app repo's own reset-demo skill, which wipes a just-built feature.
 ---
 
 # Reset demo state
@@ -11,7 +11,7 @@ resets the two that are safe to automate and verifies the third.
 
 | Surface | What "reset" means | How |
 |---|---|---|
-| **Linear tickets** (state store) | clear conductor's comment markers + reaction; move each ticket back to its armed state (Backlog) | `scripts/reset-demo.mjs` -> `POST /api/reset` + `issueUpdate` |
+| **Linear tickets** (state store) | delete ALL comments + reaction; move each ticket back to its armed state (Backlog) | `scripts/reset-demo.mjs` -> `POST /api/reset` + `issueUpdate` |
 | **Conductor** (stateless) | nothing to delete — its state *is* the Linear comments above; just confirm the board is empty | `scripts/reset-demo.mjs` -> `GET /api/board?all=1` |
 | **Target app** (`DEPLOY_TARGET_REPO`) | restore the fast `quotes-check` baseline on `main` | **human merge** (see step 3) — the script only measures + warns |
 
@@ -34,7 +34,7 @@ set -a && source .env && set +a   # or rely on injected secrets
 pnpm reset-demo
 ```
 
-For each ticket the script: resolves it to its canonical UUID, clears conductor's
+For each ticket the script: resolves it to its canonical UUID, deletes **all**
 comments + reaction via `POST /api/reset` (passing the **UUID**, so the reaction
 is removed regardless of the deployed conductor version), and moves it to the
 target state. It is **idempotent** — re-running clears 0 comments and skips
@@ -52,8 +52,8 @@ ok Board is clean - no fleets in flight.
 
 The script asserts `GET /api/board?all=1` returns no jobs. If a fleet still
 shows, a ticket retains a `conductor:fleet-started` marker — re-run, or inspect
-that ticket's comments. (Legacy `cursor-demo-bridge:*` markers are also cleared
-by `/api/reset`, which matches them via `isBridgeComment`.)
+that ticket's comments. (Explicit `/api/reset` wipes every comment; dragging a
+ticket out of "In Progress" only clears conductor-authored comments.)
 
 ### 3. Restore the target-app baseline (human merge — cannot be automated here)
 
