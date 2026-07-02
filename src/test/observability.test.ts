@@ -69,7 +69,22 @@ test("explicit production target passes even without canonical hostname env", ()
     isProductionDeployment({
       project: "compound",
       target: "production",
-      url: "https://compound-kappa-one.vercel.app",
+      url: "https://compound-gluqvc8vg-hassansaab-9511s-projects.vercel.app",
+    }),
+    true,
+  );
+});
+
+// FE-13 regression: on this Vercel team account the immutable per-deploy URL has
+// the same shape as a preview URL, so the URL heuristic must not override an
+// explicit `target: "production"`. This exact payload previously returned false
+// and froze the pipeline at deploy="running".
+test("production target with a preview-shaped immutable URL is production", () => {
+  assert.equal(
+    isProductionDeployment({
+      project: "compound",
+      target: "production",
+      url: "https://compound-qgu3i27aq-hassansaab-9511s-projects.vercel.app",
     }),
     true,
   );

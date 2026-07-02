@@ -52,22 +52,26 @@ export function isPreviewDeployUrl(url?: string): boolean {
 }
 
 /**
- * True only for deploys that actually hit production. Vercel sends `target: null`
- * for previews; treating "missing target" as production caused PR preview URLs
- * to announce "shipped to production".
+ * True only for deploys that actually hit production. An explicit `target` is
+ * authoritative and wins over any URL heuristic. `target: "production"` is
+ * production regardless of URL shape, because Vercel's immutable per-deploy URL
+ * can share the preview URL shape on team accounts; any other explicit target is
+ * not production. Only when `target` is absent (Vercel sends `target: null` for
+ * previews) do we fall back to URL heuristics, so that a missing target is not
+ * mistaken for production.
  */
 export function isProductionDeployment(dep: DeploymentInfo): boolean {
   const target = dep.target?.toLowerCase();
-  if (target && target !== "production") return false;
-  if (isPreviewDeployUrl(dep.url)) return false;
+  if (target) return target === "production";
 
-  if (target === "production") return true;
+  // No explicit target: infer from the URL. Preview-shaped URLs are not
+  // production; otherwise prefer the canonical prod host, then a legacy fallback.
+  if (isPreviewDeployUrl(dep.url)) return false;
 
   const prodHost = productionDeployHostname();
   if (prodHost && dep.url) return hostnameFromUrl(dep.url) === prodHost;
 
-  // Legacy: null target with a non-preview URL and no canonical prod host configured.
-  return !target && Boolean(dep.url);
+  return Boolean(dep.url);
 }
 
 /** Tolerantly extracts deployment fields from the varied Vercel webhook shapes. */
