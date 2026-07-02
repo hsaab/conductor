@@ -6,11 +6,12 @@
  * review, closing the circle.
  */
 import { spawnRemediationAgent, type RemediationAlert } from "./agents.js";
-import { deployTargetRepo, markers } from "../config.js";
+import { deployTargetRepo, markers, observeWindowMs } from "../config.js";
 import { datadogServiceUrl } from "../integrations/datadog.js";
-import { findActiveFleet } from "./fleet.js";
+import { findActiveFleet, verifyWindowElapsed } from "./fleet.js";
 import { hasComment } from "../integrations/linear.js";
 import { postSlack, statusBlocks } from "../integrations/slack.js";
+import type { JobSummary } from "../types.js";
 
 /** Datadog recovery/success notifications should not trigger remediation. */
 function isRecovery(alertType: string | undefined): boolean {
@@ -69,19 +70,38 @@ const remediatingIssues = new Set<string>();
 export type FleetDispatchDecision = { dispatch: true } | { dispatch: false; reason: string };
 
 /**
+ * A deployed fleet is eligible for remediation until its hotfix is dispatched,
+ * *independent of the functional verify verdict*. The verify agent checks that
+ * the feature works; a Datadog latency alert reports that it is slow. Those are
+ * orthogonal signals, so a clean functional verify must not close the remediation
+ * window — otherwise a genuine performance regression that ships, passes the test
+ * plan, and only surfaces under production load could never be remediated. The
+ * post-deploy observe window (see {@link handleDatadogAlert}) bounds how long a
+ * fleet stays eligible so happy-path tickets stop matching once it elapses.
+ */
+export function isRemediable(job: JobSummary): boolean {
+  return job.stages.deploy === "done" && job.stages.remediate === "pending";
+}
+
+/**
  * Decides whether to dispatch a remediation agent given the matched fleet's
  * state. Returns `dispatch:false` when there is no matching fleet — without a
  * fleet there is no issue to carry the `remediated` idempotency marker, so
- * spawning would be unbounded across repeated alerts — or when remediation was
- * already dispatched / is already in flight. Pure, so it is unit-tested.
+ * spawning would be unbounded across repeated alerts — when the post-deploy
+ * observe window has already elapsed, or when remediation was already dispatched
+ * / is already in flight. Pure, so it is unit-tested.
  */
 export function shouldDispatchToFleet(input: {
   hasFleet: boolean;
+  withinWindow: boolean;
   alreadyRemediated: boolean;
   inFlight: boolean;
 }): FleetDispatchDecision {
   if (!input.hasFleet) {
-    return { dispatch: false, reason: "no fleet in active verify window; not dispatching" };
+    return { dispatch: false, reason: "no deployed fleet awaiting remediation; not dispatching" };
+  }
+  if (!input.withinWindow) {
+    return { dispatch: false, reason: "post-deploy observe window elapsed; not dispatching" };
   }
   if (input.alreadyRemediated) {
     return { dispatch: false, reason: "remediation already dispatched for this fleet" };
@@ -104,16 +124,19 @@ export async function handleDatadogAlert(body: unknown): Promise<RemediationResu
     return { handled: false, reason: "ignoring unrecognized or empty Datadog payload" };
   }
 
-  // Attach to the fleet actively in its post-deploy verify window. Once verify
-  // completes cleanly (or another fleet is verifying), alerts are ignored so
-  // happy-path tickets like FE-7 never get a remediation agent.
-  const issue = await findActiveFleet(
-    (job) => job.stages.verify === "running" && job.stages.remediate === "pending",
-  );
+  // Attach to the deployed fleet still awaiting remediation, bounded by its
+  // post-deploy observe window. This is deliberately decoupled from the verify
+  // stage: a latency alert must still remediate even after the functional verify
+  // test plan has passed, because the regression is slow, not broken. The observe
+  // window (measured from the deploy/verify-agent marker) stops happy-path tickets
+  // from matching stray alerts once it elapses.
+  const issue = await findActiveFleet(isRemediable);
+  const withinWindow = !!issue && !verifyWindowElapsed(issue, Date.now(), observeWindowMs());
   // The has()→add() check-and-set below is synchronous (no await between them),
   // so concurrent invocations on one instance can't both pass the in-flight gate.
   const decision = shouldDispatchToFleet({
     hasFleet: !!issue,
+    withinWindow,
     alreadyRemediated: !!(issue && hasComment(issue, markers.remediated)),
     inFlight: !!(issue && remediatingIssues.has(issue.id)),
   });
