@@ -249,8 +249,10 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
   };
 
   if (hotfixPrOpened(issue)) {
-    const hotfixMerged = hasComment(issue, markers.hotfixMerged);
     const hotfixDeployed = hasComment(issue, markers.hotfixDeployed);
+    // Mirror the initial pass: a hotfix deploy implies the hotfix merged, even
+    // if the explicit marker was never written (e.g. no GH_TOKEN configured).
+    const hotfixMerged = hasComment(issue, markers.hotfixMerged) || hotfixDeployed;
     const hotfixVerifyPass = hasComment(issue, markers.hotfixVerifyPass);
     const hotfixVerifyFail = hasComment(issue, markers.hotfixVerifyFail);
     stages.review = hotfixMerged ? "done" : "running";

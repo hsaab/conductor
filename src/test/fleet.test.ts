@@ -380,6 +380,19 @@ test("the hotfix cycle walks merge → deploy → re-verify before remediation c
   assert.equal(verified.stages.remediate, "done");
 });
 
+test("a hotfix deploy without an explicit merge marker still completes hotfix review", () => {
+  // Without GH_TOKEN, handleHotfixDeployment stamps hotfixDeployed but never
+  // hotfixMerged — the deploy must imply the merge, mirroring the initial pass.
+  const job = summarizeJob(
+    issue([...remediationDispatchedBase, hotfixPrOpened, { body: markers.hotfixDeployed }]),
+    NOW,
+  );
+  assert.equal(job.stages.review, "done");
+  assert.equal(job.stages.deploy, "done");
+  assert.equal(job.stages.verify, "running");
+  assert.equal(job.stages.remediate, "running");
+});
+
 test("a remediation run that opened no PR does not loop the pipeline back", () => {
   // Nothing to review or merge, so the tail stages keep their terminal state
   // instead of review dead-ending on a PR that does not exist.
