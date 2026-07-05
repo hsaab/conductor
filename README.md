@@ -80,7 +80,7 @@ in Linear comment markers:
 | Review | PR opened → merged | Bugbot reviews the PR; human merges; reconciler confirms merge via GitHub (`merged` marker) |
 | Deploy | Vercel `deployment.succeeded` (`/webhook/vercel`) | Conductor records the deploy and spawns the verify agent |
 | Verify | post-deploy | Verify agent runs the test plan against production; reconciler posts pass/fail; Datadog alerts during this window still trigger remediate |
-| Remediate | Datadog alert or verify fail (`/webhook/datadog` / reconcile) | Remediation agent diagnoses and opens a hotfix PR |
+| Remediate | Datadog alert or verify fail (`/webhook/datadog` / reconcile) | Remediation agent opens a hotfix PR; the loop re-enters review and remediation completes only once the hotfix merges, redeploys, and re-verifies |
 
 ## HTTP surface
 

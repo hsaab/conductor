@@ -40,7 +40,7 @@ stateDiagram-v2
 | **review** | Bugbot reviews each PR; a human merges | GitHub + reconcile merge check |
 | **deploy** | Vercel ships the merge to production | `/webhook/vercel` |
 | **verify** | Verify cloud agent runs the test plan against prod | verify agent + reconcile |
-| **remediate** | Remediation cloud agent opens a hotfix PR | `/webhook/datadog` or verify fail |
+| **remediate** | Remediation cloud agent opens a hotfix PR, which loops the pipeline back through review → deploy → verify until the hotfix ships and re-verifies | `/webhook/datadog` or verify fail |
 
 Two properties make the whole thing robust: every entry point is **idempotent**
 (safe to retry, replay, and run on a schedule), and spawning is always
@@ -389,7 +389,7 @@ exactly what the dashboard reads from `GET /api/board`.
 | **review** | the build PR(s) merged (or a deploy stands in) | `merged` (or `deployed`) | Bugbot + human merge, confirmed by reconcile |
 | **deploy** | Vercel `deployment.succeeded` arrives | `deployed` | `/webhook/vercel` |
 | **verify** | verify agent reports pass, or the window elapses clean | `verify-pass` (fails on `verify-fail`) | verify agent + reconcile |
-| **remediate** | remediation agent's hotfix PR is reported | `remediated` (running) → `remediation-done` (done) | `/webhook/datadog` or verify fail + reconcile |
+| **remediate** | the hotfix merged, redeployed, and re-verified | `remediated` (running) → `remediation-done` (loops review/deploy/verify back) → `hotfix-verify-pass` (done) | `/webhook/datadog` or verify fail + reconcile + `/webhook/vercel` |
 
 ---
 
@@ -412,7 +412,10 @@ tag so `reset` can find and delete them all.
 | `conductor:verify-agent id=bc-…` | when the verify agent is dispatched | tracks the verify run distinct from build agents |
 | `conductor:verify-pass` / `conductor:verify-fail` | when the verify agent reports (or the window elapses) | closes verify with a verdict |
 | `conductor:remediated` | when a Datadog alert or verify fail dispatches remediation | starts remediate; dedupes repeat alerts |
-| `conductor:remediation-agent id=bc-…` / `conductor:remediation-done id=bc-…` | around alert-triggered hotfix work | tracks remediation separately from build agents |
+| `conductor:remediation-agent id=bc-…` / `conductor:remediation-done id=bc-…` | around alert-triggered hotfix work | tracks remediation separately from build agents; an opened hotfix PR loops review/deploy/verify back |
+| `conductor:hotfix-merged` / `conductor:hotfix-deployed` | when the hotfix PR(s) merge / their production deploy lands | advance the looped-back review and deploy stages |
+| `conductor:hotfix-verify-agent id=bc-…` | when the re-verify agent is dispatched against the hotfix deploy | tracks the hotfix cycle's verify run distinct from the initial pass |
+| `conductor:hotfix-verify-pass` / `conductor:hotfix-verify-fail` | when the hotfix re-verify reports (or its window elapses) | only `hotfix-verify-pass` completes remediation |
 | `conductor:announced` | when a stage result has been posted to Slack | marks Slack output as sent |
 
 ---
