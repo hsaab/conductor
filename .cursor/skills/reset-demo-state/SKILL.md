@@ -74,10 +74,21 @@ Datadog synthetic. Step 3 of `reset-demo` **gates** on this using two independen
 signals and **blocks the reset** (non-zero exit) if either shows a regression:
 
 - **Source of truth** (`GH_TOKEN`): fingerprints `main` for the FE-13 regression
-  *behavior* — marker content (`QUOTE_PACE_MS`, `getQuotesLiveSequential`) and the
-  regression-only file `constants.ts` — in a fixed set of exact files. It is a
-  *functionality* check, **not** byte-equality against a frozen tag, so features
-  built on top of `main` (new files, unrelated edits) never trip it.
+  *behavior* in a fixed set of exact surface files, combining two signal classes
+  so it catches ANY variant of the regression (fleet agents re-write it fresh
+  each run, so identifiers vary between runs):
+  1. *Regression-only content* — pacing constants (`PACE_MS`/`QUOTE_PACE_MS`),
+     `getQuotesLiveSequential`, a `setTimeout` pacing sleep inside
+     `alpha-vantage.ts`, or the regression-only file `constants.ts`. Any hit is
+     conclusive.
+  2. *Baseline-behavior loss* — behaviors every FE-13 variant must strip out:
+     the quote TTL cache in `cached.ts`, the snapshot-backed SSR quote path in
+     `portfolio.ts`, and the bounded-concurrency fan-out in `alpha-vantage.ts`.
+     Two or more losses at once flag a regression (a single loss could be a
+     legitimate refactor and does not trip the gate on its own).
+
+  It is a *functionality* check, **not** byte-equality against a frozen tag, so
+  features built on top of `main` (new files, unrelated edits) never trip it.
   Deploy-independent, so it catches a regression the instant FE-13 merges — before
   any redeploy.
 - **Live latency** (`TARGET_APP_URL`): the deployed route's `durationMs`.
