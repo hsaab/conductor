@@ -316,6 +316,27 @@ test("parsePlanText reads optional per-task reason", () => {
   ]);
 });
 
+test("parsePlanText reads the planner-chosen skill", () => {
+  const text =
+    '{"tasks":[{"repo":"compound","kind":"bug","skill":"fix-bug","instructions":"Fix it","reason":"regression in title"}]}';
+  assert.deepEqual(parsePlanText(text).tasks, [
+    {
+      repo: "compound",
+      instructions: "Fix it",
+      kind: "bug",
+      skill: "fix-bug",
+      reason: "regression in title",
+    },
+  ]);
+});
+
+test("sanitizePlan preserves the chosen skill on planned tasks", () => {
+  const plan = sanitizePlan([
+    { repo: "compound", instructions: "Add tests", kind: "test", skill: "add-tests" },
+  ]);
+  assert.equal(plan[0].skill, "add-tests");
+});
+
 test("sanitizePlan preserves reason on planned tasks", () => {
   const plan = sanitizePlan([
     {

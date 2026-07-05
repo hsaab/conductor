@@ -2,48 +2,54 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { markers } from "../config.js";
-import { routeForKind, routeGuidance, routingCommentBody } from "../pipeline/routing.js";
+import { routeGuidance, routingCommentBody } from "../pipeline/routing.js";
 import type { PlannedTask } from "../pipeline/planner.js";
 
-test("routeForKind maps feature, bug, and test to the correct child skills", () => {
-  assert.equal(routeForKind("feature").skill, "build-feature");
-  assert.equal(routeForKind("bug").skill, "fix-bug");
-  assert.equal(routeForKind("test").skill, "add-tests");
-  assert.ok(routeForKind("feature").why.length > 0);
-});
-
-test("routeGuidance mentions route-task, kind hint, and absent-skill fallback", () => {
-  const task: PlannedTask = {
-    repo: "hsaab/compound",
-    instructions: "Add middleware",
-    kind: "bug",
-  };
-  const guidance = routeGuidance(task);
-  assert.match(guidance, /route-task/);
-  assert.match(guidance, /kind=bug/);
-  assert.match(guidance, /fix-bug/);
-  assert.match(guidance, /not present in this repo/);
-  assert.match(guidance, /BUG task/);
-});
-
-test("routeGuidance uses planner reason when provided", () => {
+test("routeGuidance always routes through route-task and carries the planner's chosen skill", () => {
   const task: PlannedTask = {
     repo: "hsaab/compound",
     instructions: "Fix stale quotes",
     kind: "bug",
+    skill: "fix-bug",
+  };
+  const guidance = routeGuidance(task);
+  assert.match(guidance, /route-task/);
+  assert.match(guidance, /suggests `fix-bug`/);
+  assert.match(guidance, /not present in this repo/);
+});
+
+test("routeGuidance uses the planner reason when provided", () => {
+  const task: PlannedTask = {
+    repo: "hsaab/compound",
+    instructions: "Fix stale quotes",
+    kind: "bug",
+    skill: "fix-bug",
     reason: "ticket labels Bug and mentions regression",
   };
   const guidance = routeGuidance(task);
   assert.match(guidance, /ticket labels Bug and mentions regression/);
 });
 
+test("routeGuidance lets route-task pick the skill when the planner chose none", () => {
+  const task: PlannedTask = {
+    repo: "hsaab/compound",
+    instructions: "Add middleware",
+    kind: "feature",
+  };
+  const guidance = routeGuidance(task);
+  assert.match(guidance, /route-task/);
+  assert.match(guidance, /select the child skill/);
+  assert.doesNotMatch(guidance, /planner suggests/);
+});
+
 test("routingCommentBody carries the routing marker and per-task skill lines", () => {
   const body = routingCommentBody([
-    { repo: "hsaab/compound", instructions: "Build chat", kind: "feature" },
+    { repo: "hsaab/compound", instructions: "Build chat", kind: "feature", skill: "build-feature" },
     {
       repo: "hsaab/server",
       instructions: "Fix enricher",
       kind: "bug",
+      skill: "fix-bug",
       reason: "defect in request pipeline",
     },
   ]);
@@ -53,10 +59,10 @@ test("routingCommentBody carries the routing marker and per-task skill lines", (
   assert.match(body, /hsaab\/server.*fix-bug.*bug.*defect in request pipeline/);
 });
 
-test("routingCommentBody falls back to default rationale when reason is absent", () => {
+test("routingCommentBody shows route-task when the planner chose no skill", () => {
   const body = routingCommentBody([
     { repo: "hsaab/compound", instructions: "Add tests", kind: "test" },
   ]);
-  assert.match(body, /add-tests.*test/);
-  assert.match(body, /test coverage/);
+  assert.match(body, /hsaab\/compound.*route-task.*test/);
+  assert.match(body, /agent selects the child skill via route-task/);
 });

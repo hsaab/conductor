@@ -1,81 +1,45 @@
 /**
  * Skill routing for conductor build/verify/remediation agents.
- * Maps planner task kinds to compound child skills and formats the
- * routing decision comment posted to Linear.
+ *
+ * Routing is the agent's decision, not conductor's: the planner agent chooses a
+ * child skill per task (see `planner.ts`), and every build agent enters through
+ * the repo's `route-task` skill, which owns the final routing. This module only
+ * *carries* the planner's suggestion into the build prompt and formats the
+ * routing decision comment posted to Linear — there is no deterministic
+ * kind→skill mapping here.
  */
 import { markers } from "../config.js";
-import type { PlannedTask, TaskKind } from "./planner.js";
-
-export interface SkillRoute {
-  skill: string;
-  why: string;
-}
-
-/** Maps a planner task kind to the compound child skill and default rationale. */
-export function routeForKind(kind: TaskKind): SkillRoute {
-  switch (kind) {
-    case "bug":
-      return {
-        skill: "fix-bug",
-        why: "defect or regression — minimal targeted fix with a regression test",
-      };
-    case "test":
-      return {
-        skill: "add-tests",
-        why: "test coverage — add or migrate tests without changing product behavior",
-      };
-    case "feature":
-    default:
-      return {
-        skill: "build-feature",
-        why: "new or extended functionality — plan if substantial, implement in vertical slices",
-      };
-  }
-}
-
-/** Verbatim fallback guidance when route-task is absent (e.g. server repo). */
-function fallbackGuidance(kind: TaskKind): string {
-  switch (kind) {
-    case "bug":
-      return [
-        "This is a BUG task. Reproduce the defect, read relevant logs and errors, and make the smallest",
-        "targeted change that resolves it. Add a regression test. Then use `ship-task`.",
-      ].join(" ");
-    case "test":
-      return [
-        "This is a TEST task. Prioritize test coverage and test infrastructure:",
-        "add or migrate the highest-value tests for the described behavior, keep them",
-        "fast (no network or DB), and do not change product behavior. Then use `ship-task`.",
-      ].join(" ");
-    case "feature":
-    default:
-      return [
-        "This is a FEATURE task. Plan if substantial, implement in vertical slices,",
-        "add the highest-value tests, then use `ship-task`.",
-      ].join(" ");
-  }
-}
+import type { PlannedTask } from "./planner.js";
 
 /**
- * Prompt guidance for a build agent: enter through route-task with the planner
- * kind as a strong hint, falling back to direct guidance when the skill is absent.
+ * Prompt guidance for a build agent: always enter through `route-task` and let
+ * it own routing. When the planner already chose a child skill we pass it as a
+ * suggestion; when it did not (fallback plan), route-task selects the skill.
  */
 export function routeGuidance(task: PlannedTask): string {
-  const route = routeForKind(task.kind);
-  const reason = task.reason?.trim() || route.why;
-  return [
-    "Enter through the `route-task` skill in this repo.",
-    `The planner classified this task as kind=${task.kind} — treat it as a strong hint (expected child skill: \`${route.skill}\` — ${reason}).`,
-    "Read and follow `route-task`, then the chosen child skill end to end.",
-    `If \`route-task\` is not present in this repo, follow this guidance directly: ${fallbackGuidance(task.kind)}`,
-  ].join(" ");
+  const lines = ["Enter through the `route-task` skill in this repo and read it."];
+  if (task.skill) {
+    const reason = task.reason?.trim();
+    lines.push(
+      `The planner suggests \`${task.skill}\` as the child skill for this task${reason ? ` (${reason})` : ""} — use it unless route-task's own routing clearly points elsewhere.`,
+    );
+  } else {
+    lines.push("Follow route-task to select the child skill that best fits this task.");
+  }
+  lines.push("Then read and follow the chosen child skill end to end.");
+  lines.push(
+    `If \`route-task\` is not present in this repo${task.skill ? ` and neither is \`${task.skill}\`` : ""}, implement the task directly from the instructions below and open a PR.`,
+  );
+  return lines.join(" ");
 }
 
 /** One line per planned task for the Linear routing comment. */
 function routingLine(task: PlannedTask): string {
-  const route = routeForKind(task.kind);
-  const reason = task.reason?.trim() || route.why;
-  return `- \`${task.repo}\` → \`${route.skill}\` (${task.kind}) — ${reason}`;
+  const skill = task.skill ?? "route-task";
+  const detail =
+    task.reason?.trim() ||
+    (task.skill ? "planner-selected child skill" : "agent selects the child skill via route-task");
+  return `- \`${task.repo}\` → \`${skill}\` (${task.kind}) — ${detail}`;
 }
 
 /** Human-readable + machine-parseable routing comment for the Linear thread. */
