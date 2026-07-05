@@ -102,6 +102,11 @@ export function hasComment(issue: LinearIssuePayload, marker: string): boolean {
   return issue.comments?.some((comment) => comment.body?.includes(marker)) ?? false;
 }
 
+/** Creation time of the first comment carrying the marker, when present. */
+export function commentCreatedAt(issue: LinearIssuePayload, marker: string): string | undefined {
+  return issue.comments?.find((comment) => comment.body?.includes(marker))?.createdAt;
+}
+
 /**
  * Extracts an issue reference (a Linear UUID or a human identifier like `FE-7`)
  * from a request body, accepting any of `issueId`, `identifier`, or `id`. Used by
@@ -224,8 +229,8 @@ export function hasRemediationDone(issue: LinearIssuePayload): boolean {
   return issue.comments?.some((c) => /conductor:remediation-done/.test(c.body ?? "")) ?? false;
 }
 
-const VERIFY_SPAWN_RE = /conductor:verify-agent id=(bc-[0-9a-zA-Z_-]+)/;
-const HOTFIX_VERIFY_SPAWN_RE = /conductor:hotfix-verify-agent id=(bc-[0-9a-zA-Z_-]+)/;
+const VERIFY_SPAWN_RE = new RegExp(`${markers.verifySpawnNeedle} id=(bc-[0-9a-zA-Z_-]+)`);
+const HOTFIX_VERIFY_SPAWN_RE = new RegExp(`${markers.hotfixVerifySpawnNeedle} id=(bc-[0-9a-zA-Z_-]+)`);
 const VERIFY_FINDINGS_RE = /conductor:verify-findings id=(bc-[0-9a-zA-Z_-]+)/g;
 
 /** Verify agents dispatched for an issue (tracked separately from build/remediation). */

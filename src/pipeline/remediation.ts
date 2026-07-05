@@ -8,7 +8,9 @@
 import { spawnRemediationAgent, type RemediationAlert } from "./agents.js";
 import { deployTargetRepo, markers, observeWindowMs } from "../config.js";
 import { datadogServiceUrl } from "../integrations/datadog.js";
-import { findActiveFleet, verifyWindowElapsed } from "./fleet.js";
+import { INITIAL_PIPELINE_CYCLE } from "./cycle.js";
+import { findActiveFleet } from "./fleet.js";
+import { verifyWindowElapsed } from "./verify.js";
 import { hasComment } from "../integrations/linear.js";
 import { postSlack, statusBlocks } from "../integrations/slack.js";
 import type { JobSummary } from "../types.js";
@@ -131,7 +133,8 @@ export async function handleDatadogAlert(body: unknown): Promise<RemediationResu
   // window (measured from the deploy/verify-agent marker) stops happy-path tickets
   // from matching stray alerts once it elapses.
   const issue = await findActiveFleet(isRemediable);
-  const withinWindow = !!issue && !verifyWindowElapsed(issue, Date.now(), observeWindowMs());
+  const withinWindow =
+    !!issue && !verifyWindowElapsed(issue, Date.now(), observeWindowMs(), INITIAL_PIPELINE_CYCLE);
   // The has()→add() check-and-set below is synchronous (no await between them),
   // so concurrent invocations on one instance can't both pass the in-flight gate.
   const decision = shouldDispatchToFleet({

@@ -15,21 +15,15 @@ import { deployTargetRepo, githubToken, markers, observeWindowMs, productionDepl
 import { checkServiceHealth, datadogServiceUrl, type ServiceHealth } from "../integrations/datadog.js";
 import { spawnVerifyAgent } from "./agents.js";
 import {
-  findActiveFleet,
-  hotfixMergedComment,
+  HOTFIX_PIPELINE_CYCLE,
+  INITIAL_PIPELINE_CYCLE,
   hotfixPrOpened,
-  hotfixPrUrls,
-  mergedComment,
-  summarizeJob,
-} from "./fleet.js";
+  mergedCommentForCycle,
+  type PipelineCycle,
+} from "./cycle.js";
+import { findActiveFleet } from "./fleet.js";
 import { allPullRequestsMerged } from "../integrations/github.js";
-import {
-  hasComment,
-  parseHotfixVerifyAgents,
-  parseTestPlan,
-  parseVerifyAgents,
-  postComment,
-} from "../integrations/linear.js";
+import { hasComment, parseTestPlan, postComment } from "../integrations/linear.js";
 import { postSlack, statusBlocks } from "../integrations/slack.js";
 import type { LinearIssuePayload } from "../types.js";
 
@@ -77,8 +71,6 @@ export function isProductionDeployment(dep: DeploymentInfo): boolean {
   const target = dep.target?.toLowerCase();
   if (target) return target === "production";
 
-  // No explicit target: infer from the URL. Preview-shaped URLs are not
-  // production; otherwise prefer the canonical prod host, then a legacy fallback.
   if (isPreviewDeployUrl(dep.url)) return false;
 
   const prodHost = productionDeployHostname();
@@ -164,11 +156,82 @@ export function buildDeployAnnouncement(
   };
 }
 
-/** Build-agent PR URLs recorded on a fleet issue, used to confirm the merge before deploy. */
-function buildPrUrls(issue: LinearIssuePayload): string[] {
-  return summarizeJob(issue, Date.now())
-    .agents.filter((agent) => agent.role === "build" && agent.prUrl)
-    .map((agent) => agent.prUrl as string);
+/**
+ * When a GitHub token is configured, confirms the cycle's PR(s) merged before
+ * advancing deploy. Returns a blocking result when merge is not yet confirmed.
+ */
+async function confirmMergeBeforeDeploy(
+  issue: LinearIssuePayload,
+  cycle: PipelineCycle,
+): Promise<ObservabilityResult | null> {
+  if (!githubToken() || hasComment(issue, cycle.mergedMarker)) return null;
+
+  const prUrls = cycle.prUrls(issue);
+  const merged = prUrls.length > 0 ? await allPullRequestsMerged(prUrls) : false;
+  if (!merged) {
+    const label = cycle.id === "hotfix" ? "hotfix PR(s)" : "PR(s)";
+    return { handled: false, reason: `deploy ignored — ${issue.identifier} ${label} not merged yet` };
+  }
+
+  await postComment(issue.id, mergedCommentForCycle(cycle, prUrls));
+  return null;
+}
+
+async function stampDeployedMarker(
+  issue: LinearIssuePayload,
+  dep: DeploymentInfo,
+  cycle: PipelineCycle,
+): Promise<void> {
+  if (hasComment(issue, cycle.deployedMarker)) return;
+  const shortSha = dep.commitSha?.slice(0, 7);
+  await postComment(
+    issue.id,
+    `${cycle.deployedMarker}\n${cycle.deployedHeadline(dep.project, shortSha)}\n${dep.url ?? ""}`,
+  );
+}
+
+async function spawnVerifyIfNeeded(
+  issue: LinearIssuePayload,
+  dep: DeploymentInfo,
+  cycle: PipelineCycle,
+): Promise<void> {
+  if (cycle.parseAgents(issue).length > 0) return;
+  const prodHost = productionDeployHostname();
+  const prodUrl = dep.url ?? (prodHost ? `https://${prodHost}` : "");
+  if (prodUrl) {
+    await spawnVerifyAgent({ issue, prodUrl, testPlan: parseTestPlan(issue), cycle: cycle.id });
+  }
+}
+
+/**
+ * Handles a production deploy attributed to a fleet in its hotfix cycle: the
+ * same merge gate, deployed marker, and verify dispatch as the initial pass
+ * (via the shared helpers), with hotfix-specific Slack copy. The initial pass
+ * cannot share this whole path because its announcement carries the deploy-time
+ * error scan and must fire even when no fleet ticket matched.
+ */
+async function handleHotfixDeployment(
+  issue: LinearIssuePayload,
+  dep: DeploymentInfo,
+): Promise<ObservabilityResult> {
+  const cycle = HOTFIX_PIPELINE_CYCLE;
+  const mergeBlock = await confirmMergeBeforeDeploy(issue, cycle);
+  if (mergeBlock) return mergeBlock;
+
+  await stampDeployedMarker(issue, dep, cycle);
+
+  const shortSha = dep.commitSha?.slice(0, 7);
+  await postSlack(
+    statusBlocks(`🛠️ ${dep.project} hotfix deployed to production`, [
+      `Ticket: ${issue.identifier} — ${issue.title}`,
+      dep.url ? `Deploy: ${dep.url}` : "",
+      shortSha ? `Commit: ${shortSha}${dep.commitMessage ? ` — ${dep.commitMessage.split("\n")[0]}` : ""}` : "",
+      "Verify: 🔍 re-running the test plan against the hotfix",
+    ].filter(Boolean)),
+  );
+
+  await spawnVerifyIfNeeded(issue, dep, cycle);
+  return { handled: true };
 }
 
 /**
@@ -184,59 +247,28 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
     return { handled: false, reason: `ignoring ${kind} deploy` };
   }
 
-  // Advance the dashboard: mark the in-flight fleet (build done, not yet deployed)
-  // as deployed. Pass the deploy's commit SHA / URL as a hint so that, when more
-  // than one fleet is in flight, an exact match wins over "most recently updated".
-  // During the hotfix cycle the deploy stage re-derives as pending, so the same
-  // predicate also matches the fleet awaiting its hotfix deploy.
   const issue = await findActiveFleet(
     (job) => job.stages.build === "done" && job.stages.deploy !== "done",
     { commitSha: dep.commitSha, url: dep.url },
   );
 
-  // Hotfix cycle: the fleet already deployed once and its remediation agent has
-  // opened a hotfix PR, so this production deploy is the hotfix shipping. It
-  // advances the looped-back deploy stage and re-runs the test plan, rather than
-  // re-announcing an initial ship.
   if (issue && hotfixPrOpened(issue) && hasComment(issue, markers.deployed)) {
     return handleHotfixDeployment(issue, dep);
   }
 
-  // A deploy must follow a real merge. The target app redeploys to production for
-  // reasons unrelated to any one ticket (and its prod URL changes every time), so a
-  // bare `deployment.succeeded` is NOT proof the in-flight fleet shipped — without
-  // this gate, a stray deploy completes merge→deploy→observe for a ticket whose PR
-  // is still open. When a GitHub token is configured we confirm the fleet's PR(s)
-  // actually merged before advancing; with no token we cannot verify, so we keep the
-  // legacy behavior of trusting the deploy as the merge signal.
-  if (issue && githubToken() && !hasComment(issue, markers.merged)) {
-    const prUrls = buildPrUrls(issue);
-    const merged = prUrls.length > 0 ? await allPullRequestsMerged(prUrls) : false;
-    if (!merged) {
-      return { handled: false, reason: `deploy ignored — ${issue.identifier} PR(s) not merged yet` };
-    }
-    // The deploy webhook can beat the reconciler's merge check; record the confirmed
-    // merge here so the dashboard's review/merge stages advance in lockstep.
-    await postComment(issue.id, mergedComment(prUrls));
+  if (issue) {
+    const mergeBlock = await confirmMergeBeforeDeploy(issue, INITIAL_PIPELINE_CYCLE);
+    if (mergeBlock) return mergeBlock;
+    await stampDeployedMarker(issue, dep, INITIAL_PIPELINE_CYCLE);
   }
 
-  const shortSha = dep.commitSha?.slice(0, 7);
-  if (issue && !hasComment(issue, markers.deployed)) {
-    await postComment(
-      issue.id,
-      `${markers.deployed}\n**🚀 ${dep.project} deployed to production**${shortSha ? ` (\`${shortSha}\`)` : ""}\n${dep.url ?? ""}`,
-    );
-  }
-
-  // A fresh deploy has not been observed yet, so do not assert health. Scan only
-  // for errors already in production at deploy time; the all-clear verdict is
-  // produced later, when the observe window closes (see reconcileObserve).
   const windowMin = Math.round(observeWindowMs() / 60_000);
   const health = await checkServiceHealth(deployTargetRepo);
   const prodHost = productionDeployHostname();
-  const { headline, scanLine, observeNote } = buildDeployAnnouncement(dep.project, health, windowMin, {
+  const { headline, scanLine } = buildDeployAnnouncement(dep.project, health, windowMin, {
     matchedTicket: Boolean(issue),
   });
+  const shortSha = dep.commitSha?.slice(0, 7);
   const lines = [
     issue ? `Ticket: ${issue.identifier} — ${issue.title}` : "Ticket: none — no active fleet matched",
     dep.url ? `Deploy: ${dep.url}` : "",
@@ -248,62 +280,8 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
 
   await postSlack(statusBlocks(headline, lines));
 
-  if (issue && parseVerifyAgents(issue).length === 0) {
-    const prodHost = productionDeployHostname();
-    const prodUrl = dep.url ?? (prodHost ? `https://${prodHost}` : "");
-    const testPlan = parseTestPlan(issue);
-    if (prodUrl) {
-      await spawnVerifyAgent({ issue, prodUrl, testPlan });
-    }
-  }
-
-  return { handled: true };
-}
-
-/**
- * Handles a production deploy attributed to a fleet in its hotfix cycle: gates
- * on the hotfix PR(s) actually merging (mirroring the initial merge gate), stamps
- * the `hotfixDeployed` marker, and dispatches a fresh verify agent so the test
- * plan re-runs against the hotfix. Idempotent via the hotfix markers.
- */
-async function handleHotfixDeployment(
-  issue: LinearIssuePayload,
-  dep: DeploymentInfo,
-): Promise<ObservabilityResult> {
-  if (githubToken() && !hasComment(issue, markers.hotfixMerged)) {
-    const prUrls = hotfixPrUrls(issue);
-    const merged = prUrls.length > 0 ? await allPullRequestsMerged(prUrls) : false;
-    if (!merged) {
-      return { handled: false, reason: `deploy ignored — ${issue.identifier} hotfix PR(s) not merged yet` };
-    }
-    // The deploy webhook can beat the reconciler's hotfix merge check; record it
-    // here so the looped-back review stage advances in lockstep.
-    await postComment(issue.id, hotfixMergedComment(prUrls));
-  }
-
-  const shortSha = dep.commitSha?.slice(0, 7);
-  if (!hasComment(issue, markers.hotfixDeployed)) {
-    await postComment(
-      issue.id,
-      `${markers.hotfixDeployed}\n**🛠️ Hotfix deployed to production**${shortSha ? ` (\`${shortSha}\`)` : ""}\n${dep.url ?? ""}`,
-    );
-  }
-
-  await postSlack(
-    statusBlocks(`🛠️ ${dep.project} hotfix deployed to production`, [
-      `Ticket: ${issue.identifier} — ${issue.title}`,
-      dep.url ? `Deploy: ${dep.url}` : "",
-      shortSha ? `Commit: ${shortSha}${dep.commitMessage ? ` — ${dep.commitMessage.split("\n")[0]}` : ""}` : "",
-      "Verify: 🔍 re-running the test plan against the hotfix",
-    ].filter(Boolean)),
-  );
-
-  if (parseHotfixVerifyAgents(issue).length === 0) {
-    const prodHost = productionDeployHostname();
-    const prodUrl = dep.url ?? (prodHost ? `https://${prodHost}` : "");
-    if (prodUrl) {
-      await spawnVerifyAgent({ issue, prodUrl, testPlan: parseTestPlan(issue), cycle: "hotfix" });
-    }
+  if (issue) {
+    await spawnVerifyIfNeeded(issue, dep, INITIAL_PIPELINE_CYCLE);
   }
 
   return { handled: true };
