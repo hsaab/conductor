@@ -204,14 +204,17 @@ async function spawnVerifyIfNeeded(
 }
 
 /**
- * Shared deploy path for one pipeline cycle: merge gate, deployed marker,
- * Slack announcement, and verify-agent dispatch.
+ * Handles a production deploy attributed to a fleet in its hotfix cycle: the
+ * same merge gate, deployed marker, and verify dispatch as the initial pass
+ * (via the shared helpers), with hotfix-specific Slack copy. The initial pass
+ * cannot share this whole path because its announcement carries the deploy-time
+ * error scan and must fire even when no fleet ticket matched.
  */
-async function handleCycleDeployment(
+async function handleHotfixDeployment(
   issue: LinearIssuePayload,
   dep: DeploymentInfo,
-  cycle: PipelineCycle,
 ): Promise<ObservabilityResult> {
+  const cycle = HOTFIX_PIPELINE_CYCLE;
   const mergeBlock = await confirmMergeBeforeDeploy(issue, cycle);
   if (mergeBlock) return mergeBlock;
 
@@ -219,11 +222,11 @@ async function handleCycleDeployment(
 
   const shortSha = dep.commitSha?.slice(0, 7);
   await postSlack(
-    statusBlocks(cycle.deploySlackHeadline(dep.project), [
+    statusBlocks(`🛠️ ${dep.project} hotfix deployed to production`, [
       `Ticket: ${issue.identifier} — ${issue.title}`,
       dep.url ? `Deploy: ${dep.url}` : "",
       shortSha ? `Commit: ${shortSha}${dep.commitMessage ? ` — ${dep.commitMessage.split("\n")[0]}` : ""}` : "",
-      cycle.deploySlackVerifyLine,
+      "Verify: 🔍 re-running the test plan against the hotfix",
     ].filter(Boolean)),
   );
 
@@ -250,7 +253,7 @@ export async function handleVercelDeployment(body: unknown): Promise<Observabili
   );
 
   if (issue && hotfixPrOpened(issue) && hasComment(issue, markers.deployed)) {
-    return handleCycleDeployment(issue, dep, HOTFIX_PIPELINE_CYCLE);
+    return handleHotfixDeployment(issue, dep);
   }
 
   if (issue) {

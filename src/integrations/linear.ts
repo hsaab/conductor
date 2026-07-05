@@ -102,6 +102,11 @@ export function hasComment(issue: LinearIssuePayload, marker: string): boolean {
   return issue.comments?.some((comment) => comment.body?.includes(marker)) ?? false;
 }
 
+/** Creation time of the first comment carrying the marker, when present. */
+export function commentCreatedAt(issue: LinearIssuePayload, marker: string): string | undefined {
+  return issue.comments?.find((comment) => comment.body?.includes(marker))?.createdAt;
+}
+
 /**
  * Extracts an issue reference (a Linear UUID or a human identifier like `FE-7`)
  * from a request body, accepting any of `issueId`, `identifier`, or `id`. Used by

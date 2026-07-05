@@ -95,7 +95,7 @@ export interface VerifyRunInput {
   cycle?: PipelineCycle["id"];
 }
 
-const VERIFY_CYCLE_BY_ID = Object.fromEntries(
+const PIPELINE_CYCLE_BY_ID = Object.fromEntries(
   PIPELINE_CYCLES.map((cycle) => [cycle.id, cycle]),
 ) as Record<PipelineCycle["id"], PipelineCycle>;
 
@@ -133,7 +133,7 @@ Do NOT open a PR or modify any repository. Verification only.`;
  */
 export async function spawnVerifyAgent(input: VerifyRunInput): Promise<string | null> {
   const repo = `${ghOwner}/${deployTargetRepo}`;
-  const cycle = VERIFY_CYCLE_BY_ID[input.cycle ?? "initial"];
+  const cycle = PIPELINE_CYCLE_BY_ID[input.cycle ?? "initial"];
   console.log(
     `[verify] Starting a Cursor cloud agent on github.com/${repo} for ${input.issue.identifier} → ${input.prodUrl}`,
   );

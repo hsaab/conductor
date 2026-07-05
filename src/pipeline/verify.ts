@@ -8,21 +8,15 @@ import {
   readAgentRunResult,
   spawnRemediationAgent,
 } from "./agents.js";
+import { type PipelineCycle, PIPELINE_CYCLES } from "./cycle.js";
 import {
-  type PipelineCycle,
-  INITIAL_PIPELINE_CYCLE,
-  HOTFIX_PIPELINE_CYCLE,
-  PIPELINE_CYCLES,
-} from "./cycle.js";
-import { hasComment, parseVerifyFindingsIds, postComment } from "../integrations/linear.js";
+  commentCreatedAt,
+  hasComment,
+  parseVerifyFindingsIds,
+  postComment,
+} from "../integrations/linear.js";
 import { postSlack, statusBlocks, type SlackMessage } from "../integrations/slack.js";
 import type { LinearIssuePayload } from "../types.js";
-
-export { INITIAL_PIPELINE_CYCLE as INITIAL_VERIFY_CYCLE, HOTFIX_PIPELINE_CYCLE as HOTFIX_VERIFY_CYCLE };
-
-function commentCreatedAt(issue: LinearIssuePayload, marker: string): string | undefined {
-  return issue.comments?.find((comment) => comment.body?.includes(marker))?.createdAt;
-}
 
 /**
  * True when the post-deploy verify window has elapsed. Uses the cycle's
@@ -32,9 +26,9 @@ export function verifyWindowElapsed(
   issue: LinearIssuePayload,
   nowMs: number,
   windowMs: number,
-  cycle: PipelineCycle = INITIAL_PIPELINE_CYCLE,
+  cycle: PipelineCycle,
 ): boolean {
-  const verifyStarted = issue.comments?.find((c) => c.body?.includes(cycle.spawnNeedle))?.createdAt;
+  const verifyStarted = commentCreatedAt(issue, cycle.spawnNeedle);
   const startedAt = verifyStarted ?? commentCreatedAt(issue, cycle.deployedMarker);
   if (!startedAt) return false;
   return nowMs - Date.parse(startedAt) >= windowMs;
@@ -93,6 +87,19 @@ export function formatVerifyResultsSlack(
   return statusBlocks(headline, lines);
 }
 
+/**
+ * Whether a verify agent's test-plan findings should be posted as a late
+ * report: the run must have ended and the per-agent findings marker must not
+ * already be on the ticket. Guards the FE-13 failure mode where a window-pass
+ * settled the verdict mid-run and the findings were never delivered.
+ */
+export function shouldReportVerifyFindings(input: {
+  terminal: boolean;
+  alreadyReported: boolean;
+}): boolean {
+  return input.terminal && !input.alreadyReported;
+}
+
 /** A pure decision for the verify window-elapsed fallback. Mirrors FleetDispatchDecision. */
 export type VerifyCloseDecision = { close: true } | { close: false; reason: string };
 
@@ -120,24 +127,23 @@ function capitalize(text: string): string {
 
 interface VerifyAgentPassState {
   verdictSettled: boolean;
-  reportedFindings: Set<string>;
   verifyAgents: ReturnType<PipelineCycle["parseAgents"]>;
   verifyRunActive: boolean;
 }
 
 /**
  * Reads each verify agent's run and posts pass/fail verdicts or late findings.
- * Returns whether a verdict was newly settled (pass or fail) this tick.
+ * At most one verdict settles per tick; the remaining agents still get their
+ * findings reported (each exactly once, via the per-agent findings marker).
  */
 async function reconcileVerifyAgentResults(
   issue: LinearIssuePayload,
   cycle: PipelineCycle,
-): Promise<VerifyAgentPassState & { verdictJustSettled: boolean }> {
-  const verdictSettled = hasComment(issue, cycle.passMarker) || hasComment(issue, cycle.failMarker);
+): Promise<VerifyAgentPassState> {
+  let verdictSettled = hasComment(issue, cycle.passMarker) || hasComment(issue, cycle.failMarker);
   const reportedFindings = parseVerifyFindingsIds(issue);
   const verifyAgents = cycle.parseAgents(issue);
   let verifyRunActive = false;
-  let verdictJustSettled = false;
 
   for (const agent of verifyAgents) {
     if (verdictSettled && reportedFindings.has(agent.agentId)) continue;
@@ -159,13 +165,9 @@ ${findings}`,
       );
       console.log(`[verify] ${issue.identifier} ${cycle.label} passed`);
       await postSlack(formatVerifyResultsSlack(issue, cycle.label, "pass", findings));
-      return {
-        verdictSettled: true,
-        reportedFindings,
-        verifyAgents,
-        verifyRunActive,
-        verdictJustSettled: true,
-      };
+      verdictSettled = true;
+      reportedFindings.add(agent.agentId);
+      continue;
     }
 
     if (!verdictSettled && verdict === "fail") {
@@ -183,24 +185,26 @@ ${findings}`,
           issue,
         });
       }
-      return {
-        verdictSettled: true,
-        reportedFindings,
-        verifyAgents,
-        verifyRunActive,
-        verdictJustSettled: true,
-      };
+      verdictSettled = true;
+      reportedFindings.add(agent.agentId);
+      continue;
     }
 
-    if (result.terminal && !reportedFindings.has(agent.agentId)) {
+    if (
+      shouldReportVerifyFindings({
+        terminal: result.terminal,
+        alreadyReported: reportedFindings.has(agent.agentId),
+      })
+    ) {
       const findings = result.resultText?.trim() ?? "Verify agent finished without reporting findings.";
       await postComment(issue.id, verifyFindingsComment(agent.agentId, findings));
       console.log(`[verify] ${issue.identifier} posted findings for ${agent.agentId}`);
       await postSlack(formatVerifyResultsSlack(issue, cycle.label, parseVerifyVerdict(findings), findings));
+      reportedFindings.add(agent.agentId);
     }
   }
 
-  return { verdictSettled, reportedFindings, verifyAgents, verifyRunActive, verdictJustSettled: false };
+  return { verdictSettled, verifyAgents, verifyRunActive };
 }
 
 /**
@@ -216,7 +220,7 @@ async function closeVerifyWindowIfEligible(
   const windowDecision = shouldCloseVerifyWindow({
     hasVerifyAgents: state.verifyAgents.length > 0,
     windowElapsed: verifyWindowElapsed(issue, Date.now(), observeWindowMs(), cycle),
-    remediated: cycle.failureReported(issue),
+    remediated: cycle.outOfBandFailure?.(issue) ?? false,
     verifyRunActive: state.verifyRunActive,
   });
   if (!windowDecision.close) return;
@@ -245,8 +249,6 @@ export async function reconcileVerify(issue: LinearIssuePayload, cycle: Pipeline
   if (!hasComment(issue, cycle.deployedMarker)) return;
 
   const agentState = await reconcileVerifyAgentResults(issue, cycle);
-  if (agentState.verdictJustSettled) return;
-
   await closeVerifyWindowIfEligible(issue, cycle, agentState);
 }
 

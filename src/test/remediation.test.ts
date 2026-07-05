@@ -13,6 +13,7 @@ import {
   isRemediable,
   shouldDispatchToFleet,
 } from "../pipeline/remediation.js";
+import { INITIAL_PIPELINE_CYCLE } from "../pipeline/cycle.js";
 import { summarizeJob } from "../pipeline/fleet.js";
 import { verifyWindowElapsed } from "../pipeline/verify.js";
 import { markers } from "../config.js";
@@ -150,7 +151,7 @@ test("isRemediable is false before deploy and once remediation was dispatched", 
 
 test("a latency alert after a clean verify still dispatches within the observe window", () => {
   const iss = deployedVerifyPassedIssue();
-  const withinWindow = !verifyWindowElapsed(iss, Date.parse("2026-06-02T12:01:59.000Z"), WINDOW_MS);
+  const withinWindow = !verifyWindowElapsed(iss, Date.parse("2026-06-02T12:01:59.000Z"), WINDOW_MS, INITIAL_PIPELINE_CYCLE);
   assert.equal(withinWindow, true);
   const decision = shouldDispatchToFleet({ hasFleet: true, withinWindow, alreadyRemediated: false, inFlight: false });
   assert.equal(decision.dispatch, true);
@@ -158,7 +159,7 @@ test("a latency alert after a clean verify still dispatches within the observe w
 
 test("the same latency alert is ignored once the observe window elapses", () => {
   const iss = deployedVerifyPassedIssue();
-  const withinWindow = !verifyWindowElapsed(iss, Date.parse("2026-06-02T12:05:00.000Z"), WINDOW_MS);
+  const withinWindow = !verifyWindowElapsed(iss, Date.parse("2026-06-02T12:05:00.000Z"), WINDOW_MS, INITIAL_PIPELINE_CYCLE);
   assert.equal(withinWindow, false);
   const decision = shouldDispatchToFleet({ hasFleet: true, withinWindow, alreadyRemediated: false, inFlight: false });
   assert.equal(decision.dispatch, false);

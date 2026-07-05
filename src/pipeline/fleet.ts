@@ -16,6 +16,8 @@ import {
   INITIAL_PIPELINE_CYCLE,
   mergedCommentForCycle,
   PIPELINE_CYCLES,
+  verdictSettled,
+  type MergeContext,
   type PipelineCycle,
 } from "./cycle.js";
 import { parseEvents } from "./events.js";
@@ -23,6 +25,7 @@ import { reconcileAllVerifyCycles } from "./verify.js";
 import { allPullRequestsMerged } from "../integrations/github.js";
 import {
   addIssueReaction,
+  commentCreatedAt,
   deleteAllComments,
   deleteBridgeComments,
   hasComment,
@@ -197,10 +200,6 @@ export async function resetIssue(
   return { clearedComments };
 }
 
-function commentCreatedAt(issue: LinearIssuePayload, marker: string): string | undefined {
-  return issue.comments?.find((comment) => comment.body?.includes(marker))?.createdAt;
-}
-
 function latestBridgeCommentAt(issue: LinearIssuePayload): string | undefined {
   return issue.comments
     ?.filter((comment) => comment.createdAt && isBridgeComment(comment.body))
@@ -281,7 +280,7 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
     cycle.parseAgents(issue).map((agent) => ({
       ...agent,
       role: "verify" as const,
-      done: cycle.verdictSettled(issue) && verifyFindingsIds.has(agent.agentId),
+      done: verdictSettled(issue, cycle) && verifyFindingsIds.has(agent.agentId),
     })),
   );
 
@@ -456,22 +455,6 @@ ${prLine}`;
 }
 
 /**
- * Comment body confirming the build PR(s) merged (review/merge stage done).
- * Shared by the reconciler and the Vercel deploy webhook, which can each be the
- * first to observe the merge, so both write the identical `merged` marker.
- */
-export function mergedComment(prUrls: string[]): string {
-  return mergedCommentForCycle(INITIAL_PIPELINE_CYCLE, prUrls);
-}
-
-/** @deprecated Use {@link mergedCommentForCycle} with {@link HOTFIX_PIPELINE_CYCLE}. */
-export function hotfixMergedComment(prUrls: string[]): string {
-  return mergedCommentForCycle(HOTFIX_PIPELINE_CYCLE, prUrls);
-}
-
-export { hotfixPrOpened, hotfixPrUrls } from "./cycle.js";
-
-/**
  * Reconciles a single issue's remediation agents (the post-alert track), posting
  * their hotfix PR back to Linear and Slack. Kept separate from the build-agent
  * loop so remediation never affects build/review stage derivation.
@@ -544,11 +527,7 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
     }
 
     for (const cycle of PIPELINE_CYCLES) {
-      await reconcileMergeForCycle(
-        issue,
-        cycle,
-        cycle.requiresBuildDoneForReview ? { spawned, done } : undefined,
-      );
+      await reconcileMergeForCycle(issue, cycle, { spawned, done });
     }
 
     // Separate track: report any finished remediation agents (hotfix PRs).
@@ -567,18 +546,10 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
 async function reconcileMergeForCycle(
   issue: LinearIssuePayload,
   cycle: PipelineCycle,
-  ctx?: { spawned: SpawnedAgent[]; done: Set<string> },
+  ctx?: MergeContext,
 ): Promise<void> {
   if (hasComment(issue, cycle.mergedMarker)) return;
-
-  if (cycle.requiresBuildDoneForReview) {
-    const spawned = ctx?.spawned ?? parseSpawnedAgents(issue);
-    const done = ctx?.done ?? parseDoneAgentIds(issue);
-    const allDone = spawned.length > 0 && spawned.every((agent) => done.has(agent.agentId));
-    if (!allDone) return;
-  } else if (!hasRemediationDone(issue)) {
-    return;
-  }
+  if (!cycle.mergeReady(issue, ctx)) return;
 
   const prUrls = cycle.prUrls(issue);
   if (prUrls.length === 0) return;

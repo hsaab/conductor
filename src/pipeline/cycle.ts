@@ -6,15 +6,20 @@ import { markers } from "../config.js";
 import {
   hasComment,
   hasRemediationDone,
-  hasVerifyFail,
-  hasVerifyPass,
   parseAgentResults,
+  parseDoneAgentIds,
   parseHotfixVerifyAgents,
   parseRemediationResults,
   parseSpawnedAgents,
   parseVerifyAgents,
 } from "../integrations/linear.js";
 import type { LinearIssuePayload, SpawnedAgent, StageState } from "../types.js";
+
+/** Build-agent bookkeeping the reconciler already computed, so cycles can reuse it. */
+export interface MergeContext {
+  spawned: SpawnedAgent[];
+  done: Set<string>;
+}
 
 export interface PipelineCycle {
   id: "initial" | "hotfix";
@@ -29,22 +34,21 @@ export interface PipelineCycle {
   parseAgents: (issue: LinearIssuePayload) => SpawnedAgent[];
   prUrls: (issue: LinearIssuePayload) => string[];
   /**
-   * Whether a failure was reported out-of-band (blocks the verify window fallback).
-   * Only the initial cycle has such a channel: a Datadog alert dispatching
-   * remediation. In the hotfix cycle a re-alert is blocked by the `remediated`
-   * marker, so its only failure signal is the fail marker itself.
+   * Whether a failure was reported outside this cycle's verify markers. Only the
+   * initial cycle has such a channel: a Datadog alert dispatching remediation
+   * (the `remediated` marker). It both blocks the verify window fallback and
+   * settles the verify stage as done — the failure moved to the remediate stage.
+   * The hotfix cycle has no out-of-band channel (a re-alert is blocked by the
+   * `remediated` marker), so its only failure signal is the fail marker itself.
    */
-  failureReported: (issue: LinearIssuePayload) => boolean;
-  /** Whether verify stage can settle as done via out-of-band failure (initial only). */
-  verifyDoneOnFailureReported: boolean;
+  outOfBandFailure?: (issue: LinearIssuePayload) => boolean;
   /** Initial pass gates review on all build agents done; hotfix loop does not. */
   requiresBuildDoneForReview: boolean;
-  verdictSettled: (issue: LinearIssuePayload) => boolean;
+  /** Whether this cycle's PR(s) are ready to be checked for a merge on GitHub. */
+  mergeReady: (issue: LinearIssuePayload, ctx?: MergeContext) => boolean;
   mergeHeadline: string;
   mergeNoun: (count: number) => string;
   deployedHeadline: (project: string, shortSha?: string) => string;
-  deploySlackHeadline: (project: string) => string;
-  deploySlackVerifyLine: string;
   verifySpawnHeadline: string;
   verifySpawnMarker: (agentId: string) => string;
 }
@@ -55,6 +59,12 @@ function buildPrUrls(issue: LinearIssuePayload): string[] {
   return spawned
     .map((agent) => results.get(agent.agentId)?.prUrl)
     .filter((url): url is string => typeof url === "string" && url.length > 0);
+}
+
+function allBuildAgentsDone(issue: LinearIssuePayload, ctx?: MergeContext): boolean {
+  const spawned = ctx?.spawned ?? parseSpawnedAgents(issue);
+  const done = ctx?.done ?? parseDoneAgentIds(issue);
+  return spawned.length > 0 && spawned.every((agent) => done.has(agent.agentId));
 }
 
 /** Hotfix PR URLs recorded by the remediation agents' completion comments. */
@@ -73,6 +83,18 @@ export function hotfixPrOpened(issue: LinearIssuePayload): boolean {
   return hasRemediationDone(issue) && hotfixPrUrls(issue).length > 0;
 }
 
+/**
+ * True once this cycle's verify stage has settled: an explicit pass/fail
+ * verdict, or a failure reported through the cycle's out-of-band channel.
+ */
+export function verdictSettled(issue: LinearIssuePayload, cycle: PipelineCycle): boolean {
+  return (
+    hasComment(issue, cycle.passMarker) ||
+    hasComment(issue, cycle.failMarker) ||
+    (cycle.outOfBandFailure?.(issue) ?? false)
+  );
+}
+
 export const INITIAL_PIPELINE_CYCLE: PipelineCycle = {
   id: "initial",
   label: "verify",
@@ -83,17 +105,13 @@ export const INITIAL_PIPELINE_CYCLE: PipelineCycle = {
   spawnNeedle: markers.verifySpawnNeedle,
   parseAgents: parseVerifyAgents,
   prUrls: buildPrUrls,
-  failureReported: (issue) => hasComment(issue, markers.remediated),
-  verifyDoneOnFailureReported: true,
+  outOfBandFailure: (issue) => hasComment(issue, markers.remediated),
   requiresBuildDoneForReview: true,
-  verdictSettled: (issue) =>
-    hasVerifyPass(issue) || hasVerifyFail(issue) || hasComment(issue, markers.remediated),
+  mergeReady: allBuildAgentsDone,
   mergeHeadline: "🔀 Merged",
   mergeNoun: (count) => (count === 1 ? "pull request" : "pull requests"),
   deployedHeadline: (project, shortSha) =>
     `**🚀 ${project} deployed to production**${shortSha ? ` (\`${shortSha}\`)` : ""}`,
-  deploySlackHeadline: (project) => `🚀 ${project} shipped to production`,
-  deploySlackVerifyLine: "Verify: 🔍 running test plan against production",
   verifySpawnHeadline: "**🔍 Verify agent dispatched** — running the test plan against the deployed site.",
   verifySpawnMarker: markers.verifySpawned,
 };
@@ -108,17 +126,12 @@ export const HOTFIX_PIPELINE_CYCLE: PipelineCycle = {
   spawnNeedle: markers.hotfixVerifySpawnNeedle,
   parseAgents: parseHotfixVerifyAgents,
   prUrls: hotfixPrUrls,
-  failureReported: () => false,
-  verifyDoneOnFailureReported: false,
   requiresBuildDoneForReview: false,
-  verdictSettled: (issue) =>
-    hasComment(issue, markers.hotfixVerifyPass) || hasComment(issue, markers.hotfixVerifyFail),
+  mergeReady: (issue) => hasRemediationDone(issue),
   mergeHeadline: "🔀 Hotfix merged",
   mergeNoun: (count) => (count === 1 ? "hotfix pull request" : "hotfix pull requests"),
   deployedHeadline: (_project, shortSha) =>
     `**🛠️ Hotfix deployed to production**${shortSha ? ` (\`${shortSha}\`)` : ""}`,
-  deploySlackHeadline: (project) => `🛠️ ${project} hotfix deployed to production`,
-  deploySlackVerifyLine: "Verify: 🔍 re-running the test plan against the hotfix",
   verifySpawnHeadline:
     "**🔍 Hotfix verify agent dispatched** — re-running the test plan against the hotfix deploy.",
   verifySpawnMarker: markers.hotfixVerifySpawned,
@@ -126,12 +139,6 @@ export const HOTFIX_PIPELINE_CYCLE: PipelineCycle = {
 
 /** Ordered passes: initial ship, then hotfix loop after remediation. */
 export const PIPELINE_CYCLES = [INITIAL_PIPELINE_CYCLE, HOTFIX_PIPELINE_CYCLE] as const;
-
-/** @deprecated Use {@link INITIAL_PIPELINE_CYCLE}. Kept for tests during transition. */
-export const INITIAL_VERIFY_CYCLE = INITIAL_PIPELINE_CYCLE;
-
-/** @deprecated Use {@link HOTFIX_PIPELINE_CYCLE}. Kept for tests during transition. */
-export const HOTFIX_VERIFY_CYCLE = HOTFIX_PIPELINE_CYCLE;
 
 /**
  * Comment body confirming PR(s) merged for one pipeline cycle. Shared by the
@@ -148,6 +155,12 @@ export interface TailStageContext {
   allBuildDone: boolean;
 }
 
+export interface TailStages {
+  review: StageState;
+  deploy: StageState;
+  verify: StageState;
+}
+
 /**
  * Derives review/deploy/verify for one pipeline cycle from its markers.
  * The hotfix pass overrides the initial tail when a hotfix PR is open.
@@ -156,7 +169,7 @@ export function deriveTailStages(
   issue: LinearIssuePayload,
   cycle: PipelineCycle,
   ctx: TailStageContext,
-): Pick<Record<string, StageState>, "review" | "deploy" | "verify"> {
+): TailStages {
   const deployed = hasComment(issue, cycle.deployedMarker);
   const merged = hasComment(issue, cycle.mergedMarker) || deployed;
   const verifyPass = hasComment(issue, cycle.passMarker);
@@ -180,7 +193,7 @@ export function deriveTailStages(
       ? "done"
       : verifyFail
         ? "failed"
-        : cycle.verifyDoneOnFailureReported && hasComment(issue, markers.remediated)
+        : cycle.outOfBandFailure?.(issue)
           ? "done"
           : "running";
 
