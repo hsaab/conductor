@@ -303,6 +303,31 @@ test("parsePlanText defaults kind to feature when omitted", () => {
   ]);
 });
 
+test("parsePlanText reads optional per-task reason", () => {
+  const text =
+    '{"tasks":[{"repo":"compound","kind":"bug","instructions":"Fix it","reason":"Bug label and regression in title"}]}';
+  assert.deepEqual(parsePlanText(text).tasks, [
+    {
+      repo: "compound",
+      instructions: "Fix it",
+      kind: "bug",
+      reason: "Bug label and regression in title",
+    },
+  ]);
+});
+
+test("sanitizePlan preserves reason on planned tasks", () => {
+  const plan = sanitizePlan([
+    {
+      repo: "compound",
+      instructions: "Fix stale quotes",
+      kind: "bug",
+      reason: "ticket mentions regression",
+    },
+  ]);
+  assert.equal(plan[0].reason, "ticket mentions regression");
+});
+
 test("parsePlanText reads JSON wrapped in a fenced block and surrounding prose", () => {
   const text =
     'Here is the plan:\n```json\n{"tasks":[{"repo":"compound","kind":"test","instructions":"Add middleware"}]}\n```\nDone.';

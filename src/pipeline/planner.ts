@@ -34,6 +34,8 @@ export interface PlannedTask {
   instructions: string;
   /** Workflow class for this task; drives skill selection in the fleet agent. */
   kind: TaskKind;
+  /** Optional one-line rationale for the kind classification (shown on Linear). */
+  reason?: string;
 }
 
 /** Optional hints for the planner + a safe fallback when planning fails. */
@@ -58,7 +60,12 @@ export function sanitizePlan(tasks: PlannedTask[]): PlannedTask[] {
     const repo = name.includes("/") ? name : `${ghOwner}/${name}`;
     if (seen.has(repo)) continue;
     seen.add(repo);
-    out.push({ repo, instructions: task.instructions.trim(), kind: normalizeKind(task.kind) });
+    out.push({
+      repo,
+      instructions: task.instructions.trim(),
+      kind: normalizeKind(task.kind),
+      ...(task.reason?.trim() ? { reason: task.reason.trim() } : {}),
+    });
     if (out.length >= maxAgents) break;
   }
   return out;
@@ -93,11 +100,19 @@ export function parsePlanText(text: string): { tasks: PlannedTask[]; testPlan: T
     const testPlanRaw = root.testPlan;
     const tasks = Array.isArray(tasksRaw)
       ? tasksRaw.map((entry) => {
-          const obj = (entry ?? {}) as { repo?: unknown; instructions?: unknown; kind?: unknown };
+          const obj = (entry ?? {}) as {
+            repo?: unknown;
+            instructions?: unknown;
+            kind?: unknown;
+            reason?: unknown;
+          };
           return {
             repo: String(obj.repo ?? ""),
             instructions: String(obj.instructions ?? ""),
             kind: normalizeKind(obj.kind),
+            ...(String(obj.reason ?? "").trim()
+              ? { reason: String(obj.reason).trim() }
+              : {}),
           };
         })
       : [];
@@ -178,13 +193,14 @@ Read the Linear ticket below and decide which GitHub repos need work. Return one
 
 Extract repo names from the ticket text when present (e.g. a "Repos:" line or repos mentioned in the description). You may also pick repos from the known hints if the ticket implies them but does not name them explicitly.
 
-Classify each task with a "kind" that drives which workflow the build agent runs:
-- "feature": build or extend functionality (the default).
-- "bug": diagnose and fix a defect; prioritize reading logs/errors and a minimal targeted fix.
-- "test": add or migrate tests; prioritize coverage and test infrastructure.
+Classify each task with a "kind" that drives which child skill the build agent routes to via \`route-task\`:
+- "feature": build or extend functionality (the default) → \`build-feature\`.
+- "bug": diagnose and fix a defect → \`fix-bug\`; prioritize reading logs/errors and a minimal targeted fix.
+- "test": add or migrate tests → \`add-tests\`; prioritize coverage and test infrastructure.
 Infer the kind from the ticket: labels like "bug"/"defect" or words like "fix", "broken", "regression", "error" imply "bug"; labels like "test"/"qa" or words like "coverage", "migrate tests" imply "test"; otherwise "feature".
+Optionally include a one-line "reason" per task explaining why you chose that kind.
 
-Also produce a focused testPlan: the **3-5 most critical** acceptance checks a QA engineer would run against the deployed feature. Rank by importance; skip trivial edge cases. Each case is one concise title plus brief steps (what to do and what to expect). Do not exceed 5 cases.
+Also produce a focused testPlan following the \`create-test-plan\` skill contract: the **3-5 most critical** acceptance checks a QA engineer would run against the deployed feature. Rank by importance; skip trivial edge cases. Each case is one concise title plus brief steps (what to do and what to expect). Do not exceed 5 cases.
 
 Ticket:
 - ID: ${issue.identifier}
@@ -201,7 +217,7 @@ ${hints}
 You are ONLY planning. Do not modify files, run commands, or open a pull request — just answer.
 
 Respond with ONLY a JSON object, no prose and no markdown fences, in exactly this shape:
-{"tasks":[{"repo":"owner/repo","kind":"feature|bug|test","instructions":"concrete implementation steps for this repo only"}],"testPlan":[{"title":"short case name","steps":"what to verify and expected outcome"}]}`;
+{"tasks":[{"repo":"owner/repo","kind":"feature|bug|test","instructions":"concrete implementation steps for this repo only","reason":"optional one-line why this kind"}],"testPlan":[{"title":"short case name","steps":"what to verify and expected outcome"}]}`;
 }
 
 function defaultInstructions(issue: LinearIssuePayload): string {

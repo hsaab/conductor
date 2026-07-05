@@ -44,6 +44,7 @@ import {
   removeIssueReaction,
 } from "../integrations/linear.js";
 import { planFleet, type PlannedTask } from "./planner.js";
+import { routingCommentBody } from "./routing.js";
 import { postSlack, statusBlocks, type SlackMessage } from "../integrations/slack.js";
 import { repoShortName } from "../shared/repo.js";
 import type {
@@ -155,6 +156,8 @@ A Cursor planner agent is reading the ticket to decide which repos need work.`,
 Repos:
 ${planTaskList(plan)}`,
     );
+
+    await postComment(issue.id, routingCommentBody(plan));
 
     if (testPlan.length > 0) {
       await postComment(issue.id, formatTestPlanComment(testPlan));

@@ -9,38 +9,12 @@ import { postComment } from "../integrations/linear.js";
 import { oneLineError } from "../shared/errors.js";
 import { repoShortName } from "../shared/repo.js";
 import type { PlannedTask } from "./planner.js";
+import { routeGuidance, skillEntryLine } from "./routing.js";
 import type { LinearIssuePayload, TestCase } from "../types.js";
-
-/**
- * Maps a task kind to the compound skill and workflow emphasis the fleet agent
- * should use. Keeps the planner's classification meaningful at execution time.
- */
-function skillGuidance(kind: PlannedTask["kind"]): string {
-  switch (kind) {
-    case "bug":
-      return [
-        "This is a BUG task. Use the `build-feature` skill in fix mode:",
-        "reproduce the defect, read relevant logs and errors, and make the smallest",
-        "targeted change that resolves it. Add a regression test. Then use `ship-task`.",
-      ].join(" ");
-    case "test":
-      return [
-        "This is a TEST task. Prioritize test coverage and test infrastructure:",
-        "add or migrate the highest-value tests for the described behavior, keep them",
-        "fast (no network or DB), and do not change product behavior. Then use `ship-task`.",
-      ].join(" ");
-    case "feature":
-    default:
-      return [
-        "This is a FEATURE task. Use the `build-feature` skill: plan if substantial,",
-        "implement in vertical slices, add the highest-value tests, then use `ship-task`.",
-      ].join(" ");
-  }
-}
 
 function buildPrompt(issue: LinearIssuePayload, task: PlannedTask): string {
   const ticket = `# ${issue.identifier}: ${issue.title}\n\n${issue.description ?? ""}`;
-  return `${ticket}\n\n## Repo: ${task.repo}\n\n${skillGuidance(task.kind)}\n\n${task.instructions}\n\nOpen a PR when done.`;
+  return `${ticket}\n\n## Repo: ${task.repo}\n\n${routeGuidance(task)}\n\n${task.instructions}\n\nOpen a PR when done.`;
 }
 
 /**
@@ -103,7 +77,9 @@ function verifyPrompt(input: VerifyRunInput): string {
   const cases = input.testPlan
     .map((c, i) => `${i + 1}. **${c.title}**\n   Steps: ${c.steps}`)
     .join("\n\n");
-  return `You are the post-deploy verify agent for ticket ${input.issue.identifier}.
+  return `${skillEntryLine("verify-test-plan")}
+
+You are the post-deploy verify agent for ticket ${input.issue.identifier}.
 
 ## Deployed site
 ${input.prodUrl}
@@ -258,7 +234,9 @@ export interface RemediationAlert {
 
 function remediationPrompt(alert: RemediationAlert): string {
   const repo = `${ghOwner}/${deployTargetRepo}`;
-  return `A production monitor for \`service:${deployTargetRepo}\` just alerted.
+  return `${skillEntryLine("hotfix-regression")}
+
+A production monitor for \`service:${deployTargetRepo}\` just alerted.
 
 ## Alert
 - Monitor: ${alert.title}
