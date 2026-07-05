@@ -9,7 +9,7 @@
  * by a restore.
  *
  * So:
- *  - `reset-demo.mjs` uses {@link detectRegression} (content fingerprint) to
+ *  - `reset-demo.mjs` uses {@link detectRegression} (behavioral fingerprint) to
  *    decide whether `main` still carries the regression.
  *  - `restore-baseline.mjs` uses the same detector as a precondition (no-op when
  *    clean) and then reverts ONLY the exact files in {@link REGRESSION_SURFACE_FILES}
@@ -37,16 +37,65 @@ export const REGRESSION_SURFACE_FILES = [
 export const REGRESSION_ADDED_FILES = ["src/lib/market-data/constants.ts"];
 
 /**
- * Content markers that appear ONLY in the regressed state (verified against the
- * baseline tag vs the FE-13 commit). Their presence in a surface file is the
- * behavioral fingerprint of the slow per-symbol quote path. Deliberately narrow:
- * `GLOBAL_QUOTE` / `REALTIME_BULK_QUOTES` exist in the baseline too, so they are
- * NOT used.
+ * Positive markers: content that appears ONLY in a regressed state, never at the
+ * baseline. Any single hit is conclusive. Because fleet agents re-write the
+ * regression fresh each run, identifiers vary between variants — so these are
+ * kept, but the gate can NOT rely on them alone (see BASELINE_BEHAVIOR_MARKERS).
+ * `pattern` is a RegExp tested against the file content; optional `path` scopes
+ * the marker to one surface file.
  */
 export const REGRESSION_MARKERS = [
-  { token: "QUOTE_PACE_MS", note: "per-symbol pacing constant (sequential live quotes)" },
-  { token: "getQuotesLiveSequential", note: "sequential per-symbol live-quote path" },
+  {
+    pattern: /QUOTE_PACE_MS|(?<![A-Za-z0-9_])PACE_MS/,
+    note: "per-symbol pacing constant (sequential live quotes)",
+  },
+  {
+    pattern: /getQuotesLiveSequential/,
+    note: "sequential per-symbol live-quote path",
+  },
+  {
+    // The baseline quote fan-out never sleeps; any pacing/backoff sleep inside
+    // the Alpha Vantage provider is the sequential-quotes regression at work.
+    path: "src/lib/market-data/alpha-vantage.ts",
+    pattern: /setTimeout/,
+    note: "pacing sleep inside the quote provider (baseline fan-out never sleeps)",
+  },
 ];
+
+/**
+ * Negative markers: baseline *behaviors* the FE-13 regression must remove to
+ * produce the slow path, regardless of how a given fleet run names things:
+ *  - the quote TTL cache in `cached.ts` (regression fetches fresh every call),
+ *  - the snapshot-backed SSR quote path in `portfolio.ts` (regression blocks
+ *    first paint on live quotes),
+ *  - the bounded-concurrency fan-out in `alpha-vantage.ts` (regression goes
+ *    sequential).
+ * A surface file that exists but contains NONE of its `anyOf` tokens has lost
+ * its baseline behavior. One such loss could be a legitimate refactor, so the
+ * gate only treats these as a regression when at least
+ * {@link BASELINE_LOSS_THRESHOLD} independent behaviors are gone at once —
+ * which is exactly what every FE-13 variant does.
+ */
+export const BASELINE_BEHAVIOR_MARKERS = [
+  {
+    path: "src/lib/market-data/cached.ts",
+    anyOf: ["quoteCache", "QUOTE_TTL"],
+    note: "quote TTL cache removed (quotes fetched fresh on every call)",
+  },
+  {
+    path: "src/lib/portfolio.ts",
+    anyOf: ["SnapshotProvider"],
+    note: "snapshot-backed SSR quotes removed (first paint blocked on live quotes)",
+  },
+  {
+    path: "src/lib/market-data/alpha-vantage.ts",
+    anyOf: ["concurrency"],
+    note: "bounded-concurrency quote fan-out removed (per-symbol sequential path)",
+  },
+];
+
+/** Minimum count of lost baseline behaviors that, alone, flags a regression. */
+export const BASELINE_LOSS_THRESHOLD = 2;
 
 /** Build a bound GitHub REST client for one repo. Throws with a useful message on non-2xx. */
 export function makeGithub({ token, owner, repo }) {
@@ -101,30 +150,60 @@ export async function readFileAtRef(gh, ref, path) {
 }
 
 /**
- * Fingerprint whether `ref` carries the FE-13 regression, by content — not by
- * comparison to a frozen snapshot. Returns `{ regressed, reasons }`, where
- * `reasons` explains exactly what tripped it. Reads only the surface files, so it
- * is cheap and immune to unrelated changes elsewhere in the repo.
+ * Fingerprint whether `ref` carries the FE-13 regression, by *behavior* — not by
+ * comparison to a frozen snapshot, and not by the identifiers one particular
+ * variant happened to use (fleet agents re-write the regression fresh each run,
+ * so names vary). Two independent signal classes are combined:
+ *
+ *  1. Positive markers ({@link REGRESSION_MARKERS} + regression-only files):
+ *     content that never appears at the baseline. Any hit is conclusive.
+ *  2. Baseline-behavior loss ({@link BASELINE_BEHAVIOR_MARKERS}): behaviors the
+ *     regression must strip out of the surface files (quote cache, snapshot SSR
+ *     path, concurrent fan-out). Alone, at least
+ *     {@link BASELINE_LOSS_THRESHOLD} losses are required, so a single-file
+ *     legitimate refactor never trips the gate.
+ *
+ * Returns `{ regressed, reasons }`, where `reasons` explains exactly what
+ * tripped (or nearly tripped) it. Reads only the surface files, so it is cheap
+ * and immune to unrelated changes elsewhere in the repo.
  */
 export async function detectRegression(gh, ref, opts = {}) {
   const surfaceFiles = opts.surfaceFiles ?? REGRESSION_SURFACE_FILES;
   const addedFiles = opts.addedFiles ?? REGRESSION_ADDED_FILES;
   const markers = opts.markers ?? REGRESSION_MARKERS;
+  const baselineMarkers = opts.baselineMarkers ?? BASELINE_BEHAVIOR_MARKERS;
+  const lossThreshold = opts.lossThreshold ?? BASELINE_LOSS_THRESHOLD;
 
   const entries = await Promise.all(
     surfaceFiles.map(async (path) => [path, await readFileAtRef(gh, ref, path)]),
   );
+  const contentByPath = new Map(entries);
 
-  const reasons = [];
+  // Signal class 1: regression-only content. Any hit is conclusive.
+  const positive = [];
   for (const [path, content] of entries) {
     if (content === null) continue;
-    if (addedFiles.includes(path)) reasons.push(`${path} present (regression-only file)`);
+    if (addedFiles.includes(path)) positive.push(`${path} present (regression-only file)`);
     for (const marker of markers) {
-      if (content.includes(marker.token)) reasons.push(`${path}: "${marker.token}" — ${marker.note}`);
+      if (marker.path && marker.path !== path) continue;
+      if (marker.pattern.test(content)) {
+        positive.push(`${path}: /${marker.pattern.source}/ — ${marker.note}`);
+      }
     }
   }
 
-  return { regressed: reasons.length > 0, reasons };
+  // Signal class 2: baseline behaviors stripped from files that still exist.
+  const losses = [];
+  for (const marker of baselineMarkers) {
+    const content = contentByPath.get(marker.path);
+    if (content == null) continue; // absent/unfetched file: can't judge behavior loss
+    if (!marker.anyOf.some((token) => content.includes(token))) {
+      losses.push(`${marker.path}: ${marker.note}`);
+    }
+  }
+
+  const regressed = positive.length > 0 || losses.length >= lossThreshold;
+  return { regressed, reasons: [...positive, ...losses] };
 }
 
 /** True when `path` is inside one of the restore entries (dir prefix ending in `/`, or exact file). */

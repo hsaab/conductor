@@ -14,8 +14,10 @@
  *     It verifies the fast `quotes-check` baseline via two independent signals and
  *     BLOCKS (non-zero exit) when `main` still carries the regression:
  *       - source-of-truth (deploy-independent): fingerprints `main` for the
- *         FE-13 regression *behavior* in the specific surface files (marker
- *         content, not byte-equality with a tag), so features built on top of
+ *         FE-13 regression *behavior* in the specific surface files — both
+ *         regression-only content AND the loss of baseline behaviors (quote
+ *         cache, snapshot SSR path, concurrent fan-out), so it catches any
+ *         re-written variant of the regression while features built on top of
  *         `main` never trip it (needs GH_TOKEN);
  *       - live latency: measures the deployed `quotes-check` route (needs
  *         TARGET_APP_URL).
