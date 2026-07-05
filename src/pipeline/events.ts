@@ -35,6 +35,7 @@ function inferStage(body: string): string | undefined {
   if (/conductor:verified/.test(body)) return "verify";
   if (/conductor:deployed/.test(body)) return "deploy";
   if (/conductor:merged/.test(body)) return "review";
+  if (/conductor:routing|Routing decision/i.test(body)) return "plan";
   if (/conductor:test-plan|Test plan/i.test(body)) return "plan";
   if (/conductor:fleet-complete|conductor:agent-done/.test(body)) return "build";
   if (/agent spawned|agent failed to start/i.test(body)) return "build";

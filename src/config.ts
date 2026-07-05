@@ -118,6 +118,8 @@ export const markers = {
   deployed: "<!-- conductor:deployed -->",
   /** Posted when a test plan is generated during planning (SQA review artifact). */
   testPlan: "<!-- conductor:test-plan -->",
+  /** Posted after planning with per-task skill routing decisions. */
+  routing: "<!-- conductor:routing -->",
   /** Needle shared by verify spawn markers and parsers (no id suffix). */
   verifySpawnNeedle: "conductor:verify-agent",
   /** Marks a dispatched verify cloud agent (distinct from build/remediation agents). */

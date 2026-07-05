@@ -32,8 +32,17 @@ export function normalizeKind(value: unknown): TaskKind {
 export interface PlannedTask {
   repo: string;
   instructions: string;
-  /** Workflow class for this task; drives skill selection in the fleet agent. */
+  /** Workflow class for this task; a dashboard label, not the routing driver. */
   kind: TaskKind;
+  /**
+   * Child skill the planner agent chose for this task (e.g. `build-feature`).
+   * The build agent still enters through `route-task`; this is the planner's
+   * suggested entry, not a deterministic mapping. Absent on the fallback plan,
+   * where no planner ran and `route-task` selects the skill itself.
+   */
+  skill?: string;
+  /** Optional one-line rationale for the routing choice (shown on Linear). */
+  reason?: string;
 }
 
 /** Optional hints for the planner + a safe fallback when planning fails. */
@@ -58,7 +67,13 @@ export function sanitizePlan(tasks: PlannedTask[]): PlannedTask[] {
     const repo = name.includes("/") ? name : `${ghOwner}/${name}`;
     if (seen.has(repo)) continue;
     seen.add(repo);
-    out.push({ repo, instructions: task.instructions.trim(), kind: normalizeKind(task.kind) });
+    out.push({
+      repo,
+      instructions: task.instructions.trim(),
+      kind: normalizeKind(task.kind),
+      ...(task.skill?.trim() ? { skill: task.skill.trim() } : {}),
+      ...(task.reason?.trim() ? { reason: task.reason.trim() } : {}),
+    });
     if (out.length >= maxAgents) break;
   }
   return out;
@@ -93,11 +108,23 @@ export function parsePlanText(text: string): { tasks: PlannedTask[]; testPlan: T
     const testPlanRaw = root.testPlan;
     const tasks = Array.isArray(tasksRaw)
       ? tasksRaw.map((entry) => {
-          const obj = (entry ?? {}) as { repo?: unknown; instructions?: unknown; kind?: unknown };
+          const obj = (entry ?? {}) as {
+            repo?: unknown;
+            instructions?: unknown;
+            kind?: unknown;
+            skill?: unknown;
+            reason?: unknown;
+          };
           return {
             repo: String(obj.repo ?? ""),
             instructions: String(obj.instructions ?? ""),
             kind: normalizeKind(obj.kind),
+            ...(String(obj.skill ?? "").trim()
+              ? { skill: String(obj.skill).trim() }
+              : {}),
+            ...(String(obj.reason ?? "").trim()
+              ? { reason: String(obj.reason).trim() }
+              : {}),
           };
         })
       : [];
@@ -178,13 +205,14 @@ Read the Linear ticket below and decide which GitHub repos need work. Return one
 
 Extract repo names from the ticket text when present (e.g. a "Repos:" line or repos mentioned in the description). You may also pick repos from the known hints if the ticket implies them but does not name them explicitly.
 
-Classify each task with a "kind" that drives which workflow the build agent runs:
-- "feature": build or extend functionality (the default).
-- "bug": diagnose and fix a defect; prioritize reading logs/errors and a minimal targeted fix.
-- "test": add or migrate tests; prioritize coverage and test infrastructure.
-Infer the kind from the ticket: labels like "bug"/"defect" or words like "fix", "broken", "regression", "error" imply "bug"; labels like "test"/"qa" or words like "coverage", "migrate tests" imply "test"; otherwise "feature".
+Route each task to the child skill the build agent should run. The build agent always enters through the \`route-task\` skill in the repo; your "skill" is the entry you recommend it take. Read the ticket and choose the single best fit — the common child skills are:
+- \`build-feature\`: build or extend functionality (the usual default).
+- \`fix-bug\`: diagnose and fix a defect; prioritize reading logs/errors and a minimal targeted fix.
+- \`add-tests\`: add or migrate tests; prioritize coverage and test infrastructure.
+If none of these fits, name the skill you judge most appropriate. Include a one-line "reason" explaining the choice.
+Also set "kind" to the matching workflow class ("feature", "bug", or "test") — it is only a dashboard label, so keep it consistent with the skill (labels like "bug"/"defect" or words like "fix", "broken", "regression" imply a bug; "coverage"/"migrate tests" imply tests; otherwise a feature).
 
-Also produce a focused testPlan: the **3-5 most critical** acceptance checks a QA engineer would run against the deployed feature. Rank by importance; skip trivial edge cases. Each case is one concise title plus brief steps (what to do and what to expect). Do not exceed 5 cases.
+Also produce a focused testPlan following the \`create-test-plan\` skill contract: the **3-5 most critical** acceptance checks a QA engineer would run against the deployed feature. Rank by importance; skip trivial edge cases. Each case is one concise title plus brief steps (what to do and what to expect). Do not exceed 5 cases.
 
 Ticket:
 - ID: ${issue.identifier}
@@ -201,7 +229,7 @@ ${hints}
 You are ONLY planning. Do not modify files, run commands, or open a pull request — just answer.
 
 Respond with ONLY a JSON object, no prose and no markdown fences, in exactly this shape:
-{"tasks":[{"repo":"owner/repo","kind":"feature|bug|test","instructions":"concrete implementation steps for this repo only"}],"testPlan":[{"title":"short case name","steps":"what to verify and expected outcome"}]}`;
+{"tasks":[{"repo":"owner/repo","kind":"feature|bug|test","skill":"build-feature|fix-bug|add-tests","instructions":"concrete implementation steps for this repo only","reason":"one-line why this skill"}],"testPlan":[{"title":"short case name","steps":"what to verify and expected outcome"}]}`;
 }
 
 function defaultInstructions(issue: LinearIssuePayload): string {

@@ -62,3 +62,18 @@ test("parseEvents tags each pipeline stage from its hidden marker", () => {
   assert.equal(events[0].stage, "verify");
   assert.equal(events[1].stage, "remediate");
 });
+
+test("parseEvents tags routing decision comments as plan stage", () => {
+  const events = parseEvents(
+    issue([
+      {
+        body: `${markers.routing}\n${markers.bridge}\n**🧭 Routing decision**\n\n- \`hsaab/compound\` → \`build-feature\` (feature) — new functionality`,
+        createdAt: "2026-06-02T11:00:10.000Z",
+      },
+    ]),
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].stage, "plan");
+  assert.equal(events[0].message, "🧭 Routing decision");
+});
