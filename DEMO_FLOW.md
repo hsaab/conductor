@@ -125,7 +125,7 @@ poll `GET $BRIDGE_URL/api/board` and read `jobs[].stages`.
 | review | build done → the PR(s) merged | `merged` (or `deployed`) | Bugbot on GitHub + human merge |
 | deploy | Vercel `deployment.succeeded` arrived | `deployed` | `/webhook/vercel` |
 | verify | verify agent reports pass, or remediate ends the window | `verify-pass` (or `remediated`) | verify agent + `/api/reconcile`; Datadog alert during window |
-| remediate | hotfix PR opened by remediation agent | `remediated` (running) → `remediation-done` (done) | `/webhook/datadog` or verify fail + `/api/reconcile` |
+| remediate | hotfix merged + redeployed + re-verified | `remediated` (running) → `remediation-done` (loops review/deploy/verify back) → `hotfix-verify-pass` (done) | `/webhook/datadog` or verify fail + `/api/reconcile` + `/webhook/vercel` |
 
 **Critical operational note:** `build`, the PR URLs, `review`, and the `verify`
 window close only advance after a `/api/reconcile` pass. That pass reads finished
@@ -240,10 +240,13 @@ that opens a hotfix PR restoring batching/caching — re-entering the loop at re
   curl -s "$BRIDGE_URL/api/board?all=1" | jq '.jobs[] | select(.identifier=="FE-13") | .agents[] | select(.role=="remediation") | {done, prUrl}'
   ```
   Expect a hotfix `prUrl`; Slack posts **"🛠️ Hotfix PR opened by remediation agent"**;
-  `remediate: done`.
-- **Close (optional):** merge the hotfix; confirm `quotes-check` `durationMs` drops back
-  under 1500 and the synthetic recovers. Recovery notifications are ignored by conductor
-  (no re-trigger).
+  the pipeline loops back to review: `review: running`, `deploy/verify: pending`,
+  `remediate: running`.
+- **Close:** merge the hotfix. The next production deploy stamps `hotfix-merged` +
+  `hotfix-deployed`, a fresh verify agent re-runs the test plan, and
+  `hotfix-verify-pass` finally flips `remediate: done`. Confirm `quotes-check`
+  `durationMs` drops back under 1500 and the synthetic recovers. Recovery
+  notifications are ignored by conductor (no re-trigger).
 
 ---
 

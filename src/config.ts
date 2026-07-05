@@ -124,6 +124,8 @@ export const markers = {
   verifyPass: "<!-- conductor:verify-pass -->",
   /** Posted when the verify agent reports one or more checks failed. */
   verifyFail: "<!-- conductor:verify-fail -->",
+  /** Per-verify-agent marker: this agent's test-plan findings were reported (once). */
+  verifyFindings: (agentId: string): string => `<!-- conductor:verify-findings id=${agentId} -->`,
   /** @deprecated Legacy observe marker; kept so reset cleans older deploy comments. */
   verified: "<!-- conductor:verified -->",
   /** @deprecated Legacy observe marker; kept so reset cleans older deploy comments. */
@@ -134,8 +136,18 @@ export const markers = {
   remediated: "<!-- conductor:remediated -->",
   /** Marks a dispatched remediation agent. Distinct from build "agent spawned" so it never counts as a build agent. */
   remediationSpawned: (agentId: string): string => `<!-- conductor:remediation-agent id=${agentId} -->`,
-  /** Per-remediation-agent completion marker carrying the hotfix PR. */
+  /** Per-remediation-agent marker carrying the opened hotfix PR (the loop re-enters review here). */
   remediationDone: (agentId: string): string => `<!-- conductor:remediation-done id=${agentId} -->`,
+  /** Posted once the hotfix PR(s) merged (hotfix-cycle review done). */
+  hotfixMerged: "<!-- conductor:hotfix-merged -->",
+  /** Posted when the merged hotfix deploys to production (hotfix-cycle deploy done). */
+  hotfixDeployed: "<!-- conductor:hotfix-deployed -->",
+  /** Marks a verify agent dispatched against the hotfix deploy (hotfix-cycle re-verify). */
+  hotfixVerifySpawned: (agentId: string): string => `<!-- conductor:hotfix-verify-agent id=${agentId} -->`,
+  /** Posted when the hotfix re-verify passes; only then is remediation done. */
+  hotfixVerifyPass: "<!-- conductor:hotfix-verify-pass -->",
+  /** Posted when the hotfix re-verify fails. */
+  hotfixVerifyFail: "<!-- conductor:hotfix-verify-fail -->",
 };
 
 /**

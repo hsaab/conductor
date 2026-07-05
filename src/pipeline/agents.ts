@@ -90,6 +90,12 @@ export interface VerifyRunInput {
   issue: LinearIssuePayload;
   prodUrl: string;
   testPlan: TestCase[];
+  /**
+   * Which pipeline pass this verify run belongs to. The hotfix cycle re-runs the
+   * test plan after the remediation PR deploys, and its spawn marker must stay
+   * distinct so the reconciler scores each pass against its own verdict markers.
+   */
+  cycle?: "initial" | "hotfix";
 }
 
 function verifyPrompt(input: VerifyRunInput): string {
@@ -143,11 +149,18 @@ export async function spawnVerifyAgent(input: VerifyRunInput): Promise<string | 
     });
     const run = await agent.send(verifyPrompt(input));
     console.log(`[verify] Launched on ${repo} — agent ${agent.agentId}, run ${run.id}.`);
+    const hotfixCycle = input.cycle === "hotfix";
+    const spawnMarker = hotfixCycle
+      ? markers.hotfixVerifySpawned(agent.agentId)
+      : markers.verifySpawned(agent.agentId);
+    const headline = hotfixCycle
+      ? "**🔍 Hotfix verify agent dispatched** — re-running the test plan against the hotfix deploy."
+      : "**🔍 Verify agent dispatched** — running the test plan against the deployed site.";
     await postComment(
       input.issue.id,
-      `${markers.verifySpawned(agent.agentId)}
+      `${spawnMarker}
 ${markers.bridge}
-**🔍 Verify agent dispatched** — running the test plan against the deployed site.
+${headline}
 
 Agent ID: \`${agent.agentId}\`
 Site: ${input.prodUrl}
@@ -179,8 +192,41 @@ export interface AgentRunResult {
 }
 
 /**
- * Reads a cloud agent's latest run output text (for verify verdict parsing).
- * Returns null when the run cannot be read yet.
+ * Recovers the final assistant message from a run's conversation. Finished cloud
+ * runs frequently expose no `result`/`output` via `listRuns` (observed live on
+ * FE-13's verify run), so the agent's last reply — which carries the test-plan
+ * findings and the VERIFY_RESULT line — is the only readable report. Exported
+ * for unit tests; tolerant of the SDK's varying conversation shapes.
+ */
+export async function finalAssistantText(run: unknown): Promise<string | undefined> {
+  const r = run as { conversation?: () => Promise<unknown> };
+  if (typeof r?.conversation !== "function") return undefined;
+  try {
+    const convo = (await r.conversation()) as
+      | { messages?: unknown[]; items?: unknown[] }
+      | unknown[];
+    const entries = Array.isArray(convo) ? convo : convo?.messages ?? convo?.items ?? [];
+    const steps = entries.flatMap(
+      (entry) => ((entry as { turn?: { steps?: unknown[] } })?.turn?.steps ?? []) as Array<{
+        type?: string;
+        message?: { text?: string };
+      }>,
+    );
+    const texts = steps
+      .filter((step) => step?.type === "assistantMessage")
+      .map((step) => step?.message?.text)
+      .filter((text): text is string => typeof text === "string" && text.trim().length > 0);
+    return texts.at(-1);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Reads a cloud agent's latest run output text (for verify verdict parsing and
+ * findings reporting). Falls back to the conversation's final assistant message
+ * when a terminal run carries no result text. Returns null when the run cannot
+ * be read yet.
  */
 export async function readAgentRunResult(agentId: string): Promise<AgentRunResult | null> {
   const { Agent } = await import("@cursor/sdk");
@@ -191,7 +237,8 @@ export async function readAgentRunResult(agentId: string): Promise<AgentRunResul
       | undefined;
     if (!run?.status) return null;
     const terminal = run.status === "finished" || run.status === "error" || run.status === "cancelled";
-    const resultText = run.result ?? run.output;
+    let resultText = run.result ?? run.output;
+    if (terminal && !resultText) resultText = await finalAssistantText(run);
     return { terminal, status: run.status, resultText };
   } catch (err) {
     console.error(`[verify] could not read runs for ${agentId}:`, err);

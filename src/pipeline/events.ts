@@ -20,10 +20,15 @@ const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
  * changes. Order matters: more specific markers are checked first.
  */
 function inferStage(body: string): string | undefined {
+  // Hotfix-cycle markers map to the looped-back stage they advance, so the log
+  // reads as the second pass through review → deploy → verify.
+  if (/conductor:hotfix-verify/.test(body)) return "verify";
+  if (/conductor:hotfix-deployed/.test(body)) return "deploy";
+  if (/conductor:hotfix-merged/.test(body)) return "review";
   if (/conductor:remediation-done|conductor:remediation-agent|conductor:remediated/.test(body)) {
     return "remediate";
   }
-  if (/conductor:verify-pass|conductor:verify-fail|conductor:verify-agent/.test(body)) {
+  if (/conductor:verify-pass|conductor:verify-fail|conductor:verify-findings|conductor:verify-agent/.test(body)) {
     return "verify";
   }
   if (/conductor:observe-complete/.test(body)) return "verify";
