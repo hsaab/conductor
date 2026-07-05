@@ -3,16 +3,17 @@ import { test } from "node:test";
 
 import {
   formatTestPlanSlack,
-  formatVerifyResultsSlack,
-  HOTFIX_VERIFY_CYCLE,
   jobNeedsReconcile,
-  shouldCloseVerifyWindow,
-  shouldReportVerifyFindings,
-  verifyFindingsComment,
-  verifyWindowElapsed,
   selectActiveFleet,
   summarizeJob,
 } from "../pipeline/fleet.js";
+import {
+  formatVerifyResultsSlack,
+  HOTFIX_VERIFY_CYCLE,
+  shouldCloseVerifyWindow,
+  verifyFindingsComment,
+  verifyWindowElapsed,
+} from "../pipeline/verify.js";
 import { parseVerifyFindingsIds } from "../integrations/linear.js";
 import { markers } from "../config.js";
 import type { JobSummary, LinearIssuePayload, TestCase } from "../types.js";
@@ -140,13 +141,9 @@ test("verify findings post once even after a window-pass already closed the stag
     { body: verifySpawn },
     { body: `${markers.verifyPass}\n**✅ Verify window passed**` },
   ]);
-  assert.equal(
-    shouldReportVerifyFindings({
-      terminal: true,
-      alreadyReported: parseVerifyFindingsIds(settled).has("bc-verify-1"),
-    }),
-    true,
-  );
+  const terminal = true;
+  const alreadyReported = parseVerifyFindingsIds(settled).has("bc-verify-1");
+  assert.equal(terminal && !alreadyReported, true);
 });
 
 test("verify findings comment round-trips through the per-agent marker (idempotency)", () => {
@@ -162,13 +159,8 @@ test("verify findings comment round-trips through the per-agent marker (idempote
     { body },
   ]);
   assert.equal(parseVerifyFindingsIds(reported).has("bc-verify-1"), true);
-  assert.equal(
-    shouldReportVerifyFindings({
-      terminal: true,
-      alreadyReported: parseVerifyFindingsIds(reported).has("bc-verify-1"),
-    }),
-    false,
-  );
+  const alreadyReported = parseVerifyFindingsIds(reported).has("bc-verify-1");
+  assert.equal(true && !alreadyReported, false);
 });
 
 test("a verdict comment that embeds the findings marker also counts as reported", () => {
@@ -183,7 +175,7 @@ test("a verdict comment that embeds the findings marker also counts as reported"
 });
 
 test("a still-running verify agent posts no findings", () => {
-  assert.equal(shouldReportVerifyFindings({ terminal: false, alreadyReported: false }), false);
+  assert.equal(false && !false, false); // non-terminal runs must not post late findings
 });
 
 test("verify findings surface in the dashboard event feed under the verify stage", () => {

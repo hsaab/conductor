@@ -118,6 +118,8 @@ export const markers = {
   deployed: "<!-- conductor:deployed -->",
   /** Posted when a test plan is generated during planning (SQA review artifact). */
   testPlan: "<!-- conductor:test-plan -->",
+  /** Needle shared by verify spawn markers and parsers (no id suffix). */
+  verifySpawnNeedle: "conductor:verify-agent",
   /** Marks a dispatched verify cloud agent (distinct from build/remediation agents). */
   verifySpawned: (agentId: string): string => `<!-- conductor:verify-agent id=${agentId} -->`,
   /** Posted when the verify agent reports all critical checks passed. */
@@ -142,6 +144,8 @@ export const markers = {
   hotfixMerged: "<!-- conductor:hotfix-merged -->",
   /** Posted when the merged hotfix deploys to production (hotfix-cycle deploy done). */
   hotfixDeployed: "<!-- conductor:hotfix-deployed -->",
+  /** Needle shared by hotfix verify spawn markers and parsers (no id suffix). */
+  hotfixVerifySpawnNeedle: "conductor:hotfix-verify-agent",
   /** Marks a verify agent dispatched against the hotfix deploy (hotfix-cycle re-verify). */
   hotfixVerifySpawned: (agentId: string): string => `<!-- conductor:hotfix-verify-agent id=${agentId} -->`,
   /** Posted when the hotfix re-verify passes; only then is remediation done. */

@@ -224,8 +224,8 @@ export function hasRemediationDone(issue: LinearIssuePayload): boolean {
   return issue.comments?.some((c) => /conductor:remediation-done/.test(c.body ?? "")) ?? false;
 }
 
-const VERIFY_SPAWN_RE = /conductor:verify-agent id=(bc-[0-9a-zA-Z_-]+)/;
-const HOTFIX_VERIFY_SPAWN_RE = /conductor:hotfix-verify-agent id=(bc-[0-9a-zA-Z_-]+)/;
+const VERIFY_SPAWN_RE = new RegExp(`${markers.verifySpawnNeedle} id=(bc-[0-9a-zA-Z_-]+)`);
+const HOTFIX_VERIFY_SPAWN_RE = new RegExp(`${markers.hotfixVerifySpawnNeedle} id=(bc-[0-9a-zA-Z_-]+)`);
 const VERIFY_FINDINGS_RE = /conductor:verify-findings id=(bc-[0-9a-zA-Z_-]+)/g;
 
 /** Verify agents dispatched for an issue (tracked separately from build/remediation). */

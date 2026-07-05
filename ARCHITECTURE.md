@@ -216,8 +216,9 @@ sequenceDiagram
 Idempotent throughout: per-agent `agent-done` / `remediation-done` markers and the
 one-shot `merged` / `verify-pass` markers mean each thing is reported exactly once,
 no matter how often the sweep runs.
-Code: `reconcileAll()` / `reconcileMerge()` / `reconcileVerify()` in
-[`src/pipeline/fleet.ts`](src/pipeline/fleet.ts); `checkAgentRun()` /
+Code: `reconcileAll()` / `reconcileMergeForCycle()` in
+[`src/pipeline/fleet.ts`](src/pipeline/fleet.ts); `reconcileVerify()` in
+[`src/pipeline/verify.ts`](src/pipeline/verify.ts); `checkAgentRun()` /
 `readAgentRunResult()` / `isRunReportable()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts).
 
 > **Cron cadence.** `vercel.json` schedules `/api/reconcile` once daily
@@ -308,7 +309,7 @@ reconciler (Flow 2), and merging it flows back through review → deploy → ver
 Code: `handleDatadogAlert()` / `shouldDispatchToFleet()` in
 [`src/pipeline/remediation.ts`](src/pipeline/remediation.ts); `spawnRemediationAgent()` /
 `remediationPrompt()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts);
-verify-fail path in `reconcileVerify()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts).
+verify-fail path in `reconcileVerify()` in [`src/pipeline/verify.ts`](src/pipeline/verify.ts).
 
 ### Manual operator endpoints
 
@@ -379,7 +380,7 @@ Code: `selectActiveFleet()` / `findActiveFleet()` in [`src/pipeline/fleet.ts`](s
 ## Stage ↔ marker model
 
 Each stage's state is derived purely from the issue's comment markers (see
-`deriveStages()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts)), which is
+`deriveTailStages()` in [`src/pipeline/cycle.ts`](src/pipeline/cycle.ts) (via `deriveStages()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts)), which is
 exactly what the dashboard reads from `GET /api/board`.
 
 | Stage | Becomes `done` when… | Marker(s) | Driven by |
@@ -431,7 +432,8 @@ Everything the diagrams reference, mapped to the source.
 | Decide to spawn / launch the fleet | `shouldSpawn()`, `triggerFleet()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts) |
 | Planner agent (task list + test plan, retries, fallback) | `planFleet()` / `planWithRetries()` in [`src/pipeline/planner.ts`](src/pipeline/planner.ts) |
 | Spawn one build agent (fire-and-forget) + prompt | `spawnAgent()` / `buildPrompt()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts) |
-| Reconcile: report PRs, confirm merge, close verify | `reconcileAll()` / `reconcileMerge()` / `reconcileVerify()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts) |
+| Reconcile: report PRs, confirm merge, close verify | `reconcileAll()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts); `reconcileVerify()` in [`src/pipeline/verify.ts`](src/pipeline/verify.ts) |
+| Initial vs hotfix pipeline pass descriptors | `INITIAL_PIPELINE_CYCLE` / `HOTFIX_PIPELINE_CYCLE` in [`src/pipeline/cycle.ts`](src/pipeline/cycle.ts) |
 | Read a cloud run's status / result | `checkAgentRun()` / `readAgentRunResult()` / `isRunReportable()` in [`src/pipeline/agents.ts`](src/pipeline/agents.ts) |
 | Opportunistic reconcile from dashboard polls | `reconcileTick()` in [`src/pipeline/fleet.ts`](src/pipeline/fleet.ts), `/api/board` in [`src/index.ts`](src/index.ts) |
 | Deploy handler (record deploy, gate on merge, spawn verify) | `handleVercelDeployment()` in [`src/pipeline/observability.ts`](src/pipeline/observability.ts) |

@@ -4,6 +4,7 @@
  */
 
 import { cursorKey, deployTargetRepo, ghOwner, markers, modelId } from "../config.js";
+import { PIPELINE_CYCLES, type PipelineCycle } from "./cycle.js";
 import { postComment } from "../integrations/linear.js";
 import { oneLineError } from "../shared/errors.js";
 import { repoShortName } from "../shared/repo.js";
@@ -90,19 +91,18 @@ export interface VerifyRunInput {
   issue: LinearIssuePayload;
   prodUrl: string;
   testPlan: TestCase[];
-  /**
-   * Which pipeline pass this verify run belongs to. The hotfix cycle re-runs the
-   * test plan after the remediation PR deploys, and its spawn marker must stay
-   * distinct so the reconciler scores each pass against its own verdict markers.
-   */
-  cycle?: "initial" | "hotfix";
+  /** Which pipeline pass this verify run belongs to. */
+  cycle?: PipelineCycle["id"];
 }
+
+const VERIFY_CYCLE_BY_ID = Object.fromEntries(
+  PIPELINE_CYCLES.map((cycle) => [cycle.id, cycle]),
+) as Record<PipelineCycle["id"], PipelineCycle>;
 
 function verifyPrompt(input: VerifyRunInput): string {
   const cases = input.testPlan
     .map((c, i) => `${i + 1}. **${c.title}**\n   Steps: ${c.steps}`)
     .join("\n\n");
-  const repo = `${ghOwner}/${deployTargetRepo}`;
   return `You are the post-deploy verify agent for ticket ${input.issue.identifier}.
 
 ## Deployed site
@@ -133,6 +133,7 @@ Do NOT open a PR or modify any repository. Verification only.`;
  */
 export async function spawnVerifyAgent(input: VerifyRunInput): Promise<string | null> {
   const repo = `${ghOwner}/${deployTargetRepo}`;
+  const cycle = VERIFY_CYCLE_BY_ID[input.cycle ?? "initial"];
   console.log(
     `[verify] Starting a Cursor cloud agent on github.com/${repo} for ${input.issue.identifier} → ${input.prodUrl}`,
   );
@@ -149,18 +150,11 @@ export async function spawnVerifyAgent(input: VerifyRunInput): Promise<string | 
     });
     const run = await agent.send(verifyPrompt(input));
     console.log(`[verify] Launched on ${repo} — agent ${agent.agentId}, run ${run.id}.`);
-    const hotfixCycle = input.cycle === "hotfix";
-    const spawnMarker = hotfixCycle
-      ? markers.hotfixVerifySpawned(agent.agentId)
-      : markers.verifySpawned(agent.agentId);
-    const headline = hotfixCycle
-      ? "**🔍 Hotfix verify agent dispatched** — re-running the test plan against the hotfix deploy."
-      : "**🔍 Verify agent dispatched** — running the test plan against the deployed site.";
     await postComment(
       input.issue.id,
-      `${spawnMarker}
+      `${cycle.verifySpawnMarker(agent.agentId)}
 ${markers.bridge}
-${headline}
+${cycle.verifySpawnHeadline}
 
 Agent ID: \`${agent.agentId}\`
 Site: ${input.prodUrl}
@@ -191,27 +185,34 @@ export interface AgentRunResult {
   resultText?: string;
 }
 
+/** A single assistant message step inside a cloud run conversation. */
+interface AssistantMessageStep {
+  type?: string;
+  message?: { text?: string };
+}
+
+/** One turn in the SDK conversation list (shape varies by API version). */
+interface ConversationTurn {
+  turn?: { steps?: AssistantMessageStep[] };
+}
+
+/** Run object that may expose a conversation() reader. */
+interface RunWithConversation {
+  conversation?: () => Promise<ConversationTurn[] | { messages?: ConversationTurn[]; items?: ConversationTurn[] }>;
+}
+
 /**
  * Recovers the final assistant message from a run's conversation. Finished cloud
- * runs frequently expose no `result`/`output` via `listRuns` (observed live on
- * FE-13's verify run), so the agent's last reply — which carries the test-plan
- * findings and the VERIFY_RESULT line — is the only readable report. Exported
- * for unit tests; tolerant of the SDK's varying conversation shapes.
+ * runs frequently expose no `result`/`output` via `listRuns`, so the agent's
+ * last reply is the only readable report. Tolerant of varying SDK shapes.
  */
 export async function finalAssistantText(run: unknown): Promise<string | undefined> {
-  const r = run as { conversation?: () => Promise<unknown> };
+  const r = run as RunWithConversation;
   if (typeof r?.conversation !== "function") return undefined;
   try {
-    const convo = (await r.conversation()) as
-      | { messages?: unknown[]; items?: unknown[] }
-      | unknown[];
+    const convo = await r.conversation();
     const entries = Array.isArray(convo) ? convo : convo?.messages ?? convo?.items ?? [];
-    const steps = entries.flatMap(
-      (entry) => ((entry as { turn?: { steps?: unknown[] } })?.turn?.steps ?? []) as Array<{
-        type?: string;
-        message?: { text?: string };
-      }>,
-    );
+    const steps = entries.flatMap((entry) => entry?.turn?.steps ?? []);
     const texts = steps
       .filter((step) => step?.type === "assistantMessage")
       .map((step) => step?.message?.text)

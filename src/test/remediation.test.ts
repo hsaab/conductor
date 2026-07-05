@@ -13,7 +13,8 @@ import {
   isRemediable,
   shouldDispatchToFleet,
 } from "../pipeline/remediation.js";
-import { summarizeJob, verifyWindowElapsed } from "../pipeline/fleet.js";
+import { summarizeJob } from "../pipeline/fleet.js";
+import { verifyWindowElapsed } from "../pipeline/verify.js";
 import { markers } from "../config.js";
 import type { LinearIssuePayload } from "../types.js";
 

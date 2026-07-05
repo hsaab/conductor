@@ -8,7 +8,8 @@
 import { spawnRemediationAgent, type RemediationAlert } from "./agents.js";
 import { deployTargetRepo, markers, observeWindowMs } from "../config.js";
 import { datadogServiceUrl } from "../integrations/datadog.js";
-import { findActiveFleet, verifyWindowElapsed } from "./fleet.js";
+import { findActiveFleet } from "./fleet.js";
+import { verifyWindowElapsed } from "./verify.js";
 import { hasComment } from "../integrations/linear.js";
 import { postSlack, statusBlocks } from "../integrations/slack.js";
 import type { JobSummary } from "../types.js";

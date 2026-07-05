@@ -2,18 +2,24 @@
  * Fleet orchestration: planning tasks from the ticket, launching agents (without
  * blocking on completion), and reconciling finished runs back into Linear.
  */
-import { markers, observeWindowMs, triggerLabel, triggerState } from "../config.js";
+import { markers, triggerLabel, triggerState } from "../config.js";
 import {
   checkAgentRun,
   isRunReportable,
-  parseVerifyVerdict,
-  readAgentRunResult,
   spawnAgent,
-  spawnRemediationAgent,
-  spawnVerifyAgent,
   type AgentRunStatus,
 } from "./agents.js";
+import {
+  deriveTailStages,
+  hotfixPrOpened,
+  HOTFIX_PIPELINE_CYCLE,
+  INITIAL_PIPELINE_CYCLE,
+  mergedCommentForCycle,
+  PIPELINE_CYCLES,
+  type PipelineCycle,
+} from "./cycle.js";
 import { parseEvents } from "./events.js";
+import { reconcileAllVerifyCycles } from "./verify.js";
 import { allPullRequestsMerged } from "../integrations/github.js";
 import {
   addIssueReaction,
@@ -26,15 +32,11 @@ import {
   listFleetIssues,
   parseAgentResults,
   parseDoneAgentIds,
-  parseHotfixVerifyAgents,
   parseRemediationAgents,
   parseRemediationDoneIds,
   parseRemediationResults,
   parseSpawnedAgents,
-  parseVerifyAgents,
   parseVerifyFindingsIds,
-  hasVerifyFail,
-  hasVerifyPass,
   postComment,
   removeIssueReaction,
 } from "../integrations/linear.js";
@@ -224,214 +226,27 @@ function deriveStages(issue: LinearIssuePayload, buildAgents: JobAgent[]): Recor
   const spawned = buildAgents.length > 0;
   const allDone = spawned && buildAgents.every((agent) => agent.done);
   const startupFailed = hasStartupFailure(issue);
-  const deployed = hasComment(issue, markers.deployed);
-  const merged = hasComment(issue, markers.merged) || deployed;
-  const verifyPass = hasVerifyPass(issue);
-  const verifyFail = hasVerifyFail(issue);
   const remediated = hasComment(issue, markers.remediated);
   const remediationDone = hasRemediationDone(issue);
+  const tailCtx = { allBuildDone: allDone };
+  const initialTail = deriveTailStages(issue, INITIAL_PIPELINE_CYCLE, tailCtx);
 
   const stages: Record<string, StageState> = {
     plan: !started ? "pending" : spawned ? "done" : "running",
     build: startupFailed ? "failed" : !spawned ? "pending" : allDone ? "done" : "running",
-    review: !allDone ? "pending" : merged ? "done" : "running",
-    deploy: deployed ? "done" : merged ? "running" : "pending",
-    verify: !deployed
-      ? "pending"
-      : verifyPass
-        ? "done"
-        : verifyFail
-          ? "failed"
-          : remediated
-            ? "done"
-            : "running",
+    ...initialTail,
     remediate: remediationDone ? "done" : remediated ? "running" : "pending",
   };
 
   if (hotfixPrOpened(issue)) {
-    const hotfixDeployed = hasComment(issue, markers.hotfixDeployed);
-    // Mirror the initial pass: a hotfix deploy implies the hotfix merged, even
-    // if the explicit marker was never written (e.g. no GH_TOKEN configured).
-    const hotfixMerged = hasComment(issue, markers.hotfixMerged) || hotfixDeployed;
-    const hotfixVerifyPass = hasComment(issue, markers.hotfixVerifyPass);
-    const hotfixVerifyFail = hasComment(issue, markers.hotfixVerifyFail);
-    stages.review = hotfixMerged ? "done" : "running";
-    stages.deploy = hotfixDeployed ? "done" : hotfixMerged ? "running" : "pending";
-    stages.verify = hotfixVerifyPass
-      ? "done"
-      : hotfixVerifyFail
-        ? "failed"
-        : hotfixDeployed
-          ? "running"
-          : "pending";
-    stages.remediate = hotfixVerifyPass ? "done" : "running";
+    const hotfixTail = deriveTailStages(issue, HOTFIX_PIPELINE_CYCLE, tailCtx);
+    stages.review = hotfixTail.review;
+    stages.deploy = hotfixTail.deploy;
+    stages.verify = hotfixTail.verify;
+    stages.remediate = hasComment(issue, markers.hotfixVerifyPass) ? "done" : "running";
   }
 
   return stages;
-}
-
-/**
- * One pass of the verify machinery. The pipeline runs it twice: once against
- * the initial deploy, and once against the hotfix deploy after remediation.
- * Both passes share the same reconcile logic; only the markers (and copy)
- * that scope each pass differ.
- */
-interface VerifyCycle {
-  /** Human label used in log lines, Slack copy, and comment headlines. */
-  label: "verify" | "hotfix verify";
-  /** Deploy marker that opens this cycle's verify window. */
-  deployedMarker: string;
-  passMarker: string;
-  failMarker: string;
-  /** Comment substring identifying this cycle's verify-agent spawns (window start). */
-  spawnNeedle: string;
-  parseAgents: (issue: LinearIssuePayload) => SpawnedAgent[];
-  /**
-   * Whether a failure was reported out-of-band (blocks the window fallback).
-   * Only the initial cycle has such a channel: a Datadog alert dispatching
-   * remediation. In the hotfix cycle a re-alert is blocked by the `remediated`
-   * marker, so its only failure signal is the fail marker itself.
-   */
-  failureReported: (issue: LinearIssuePayload) => boolean;
-}
-
-export const INITIAL_VERIFY_CYCLE: VerifyCycle = {
-  label: "verify",
-  deployedMarker: markers.deployed,
-  passMarker: markers.verifyPass,
-  failMarker: markers.verifyFail,
-  spawnNeedle: "conductor:verify-agent",
-  parseAgents: parseVerifyAgents,
-  failureReported: (issue) => hasComment(issue, markers.remediated),
-};
-
-export const HOTFIX_VERIFY_CYCLE: VerifyCycle = {
-  label: "hotfix verify",
-  deployedMarker: markers.hotfixDeployed,
-  passMarker: markers.hotfixVerifyPass,
-  failMarker: markers.hotfixVerifyFail,
-  spawnNeedle: "conductor:hotfix-verify-agent",
-  parseAgents: parseHotfixVerifyAgents,
-  failureReported: () => false,
-};
-
-/**
- * True when the post-deploy verify window has elapsed. Uses the cycle's
- * verify-agent spawn timestamp when present, otherwise its deployed marker.
- */
-export function verifyWindowElapsed(
-  issue: LinearIssuePayload,
-  nowMs: number,
-  windowMs: number,
-  cycle: VerifyCycle = INITIAL_VERIFY_CYCLE,
-): boolean {
-  const verifyStarted = issue.comments?.find((c) => c.body?.includes(cycle.spawnNeedle))?.createdAt;
-  const startedAt = verifyStarted ?? commentCreatedAt(issue, cycle.deployedMarker);
-  if (!startedAt) return false;
-  return nowMs - Date.parse(startedAt) >= windowMs;
-}
-
-/** @deprecated Use {@link verifyWindowElapsed}. Kept for older tests/docs during transition. */
-export const observeWindowElapsed = verifyWindowElapsed;
-
-/**
- * Whether a verify agent's test-plan findings should be posted now: only once
- * (per-agent `verifyFindings` marker) and only when the run is terminal — an
- * active run's findings are still being produced. Pure, so it is unit-tested.
- */
-export function shouldReportVerifyFindings(input: {
-  terminal: boolean;
-  alreadyReported: boolean;
-}): boolean {
-  return input.terminal && !input.alreadyReported;
-}
-
-/**
- * Findings comment body for one verify agent. Carries the per-agent
- * `verifyFindings` marker (idempotency) and the run's full result text — the
- * per-case pass/fail evidence the verify prompt mandates.
- */
-export function verifyFindingsComment(agentId: string, findings: string): string {
-  return `${markers.verifyFindings(agentId)}
-**🔎 Verify findings** — test-plan results from the verify agent.
-
-Agent ID: \`${agentId}\`
-
-${findings.trim()}`;
-}
-
-/**
- * Reduces the verify agent's markdown findings to Slack mrkdwn lines: headings
- * become plain text, double-asterisk bold becomes Slack's single-asterisk bold,
- * and blank lines drop (Slack sections render tighter without them).
- */
-function findingsToSlackLines(findings: string): string[] {
-  return findings
-    .split("\n")
-    .map((line) => line.trim().replace(/^#{1,6}\s+/, "").replace(/\*\*/g, "*"))
-    .filter(Boolean);
-}
-
-/** Slack caps a section's mrkdwn at 3000 chars; leave headroom for the title line. */
-const SLACK_FINDINGS_CHAR_BUDGET = 2800;
-
-/**
- * Slack rendering of a verify run's per-case results, posted when the verify
- * stage settles — the counterpart to {@link formatTestPlanSlack}, which posts
- * the cases before they run. Shared by both verify cycles; `verdict` is null
- * when the findings arrive after the stage already settled (late report).
- * Long findings are truncated to fit Slack's section limit; the Linear ticket
- * always carries the full text.
- */
-export function formatVerifyResultsSlack(
-  issue: LinearIssuePayload,
-  cycleLabel: string,
-  verdict: "pass" | "fail" | null,
-  findings: string,
-): SlackMessage {
-  const headline =
-    verdict === "pass"
-      ? `✅ ${issue.identifier} — ${cycleLabel} passed — test-plan results`
-      : verdict === "fail"
-        ? `❌ ${issue.identifier} — ${cycleLabel} failed — test-plan results`
-        : `🔎 ${issue.identifier} — ${cycleLabel} findings`;
-
-  const lines: string[] = [issue.title];
-  let used = issue.title.length;
-  for (const line of findingsToSlackLines(findings)) {
-    if (used + line.length > SLACK_FINDINGS_CHAR_BUDGET) {
-      lines.push("… (truncated — full findings on the Linear ticket)");
-      break;
-    }
-    lines.push(line);
-    used += line.length;
-  }
-  return statusBlocks(headline, lines);
-}
-
-/** A pure decision for the verify window-elapsed fallback. Mirrors FleetDispatchDecision. */
-export type VerifyCloseDecision = { close: true } | { close: false; reason: string };
-
-/**
- * Decides whether the window-elapsed fallback may close verify as a pass.
- * Pure, so it is unit-tested; {@link reconcileVerify} supplies the inputs.
- *
- * The fallback exists for the happy path: window elapsed, nothing reported.
- * It must stay quiet when a failure WAS reported via Datadog (the `remediated`
- * marker — "no failures reported" would be false) and while the verify agent's
- * run is still active (its verdict is still coming; the next tick re-checks).
- */
-export function shouldCloseVerifyWindow(input: {
-  hasVerifyAgents: boolean;
-  windowElapsed: boolean;
-  remediated: boolean;
-  verifyRunActive: boolean;
-}): VerifyCloseDecision {
-  if (!input.hasVerifyAgents) return { close: false, reason: "no verify agent dispatched" };
-  if (!input.windowElapsed) return { close: false, reason: "verify window still open" };
-  if (input.remediated) return { close: false, reason: "remediation dispatched — a failure was reported" };
-  if (input.verifyRunActive) return { close: false, reason: "verify agent still running — verdict pending" };
-  return { close: true };
 }
 
 /**
@@ -461,26 +276,16 @@ export function summarizeJob(issue: LinearIssuePayload, nowMs: number): JobSumma
   // were reported (per-agent marker). A window/remediation close without the
   // findings leaves the agent pending, which keeps jobNeedsReconcile true so the
   // opportunistic reconciler can still deliver the late-arriving findings.
-  const verifyVerdictSettled =
-    hasVerifyPass(issue) || hasVerifyFail(issue) || hasComment(issue, markers.remediated);
   const verifyFindingsIds = parseVerifyFindingsIds(issue);
-  const verifyAgents: JobAgent[] = parseVerifyAgents(issue).map((agent) => ({
-    ...agent,
-    role: "verify",
-    done: verifyVerdictSettled && verifyFindingsIds.has(agent.agentId),
-  }));
+  const verifyAgents: JobAgent[] = PIPELINE_CYCLES.flatMap((cycle) =>
+    cycle.parseAgents(issue).map((agent) => ({
+      ...agent,
+      role: "verify" as const,
+      done: cycle.verdictSettled(issue) && verifyFindingsIds.has(agent.agentId),
+    })),
+  );
 
-  // The hotfix cycle's re-verify agents settle against the hotfix verdict
-  // markers, never the initial pass's.
-  const hotfixVerdictSettled =
-    hasComment(issue, markers.hotfixVerifyPass) || hasComment(issue, markers.hotfixVerifyFail);
-  const hotfixVerifyAgents: JobAgent[] = parseHotfixVerifyAgents(issue).map((agent) => ({
-    ...agent,
-    role: "verify",
-    done: hotfixVerdictSettled && verifyFindingsIds.has(agent.agentId),
-  }));
-
-  const agents = [...buildAgents, ...verifyAgents, ...hotfixVerifyAgents, ...remediationAgents];
+  const agents = [...buildAgents, ...verifyAgents, ...remediationAgents];
   const startedAt = commentCreatedAt(issue, markers.fleetStarted);
   const completedAt = commentCreatedAt(issue, markers.fleetComplete);
   const status: JobSummary["status"] = completedAt ? "complete" : "in-progress";
@@ -656,35 +461,15 @@ ${prLine}`;
  * first to observe the merge, so both write the identical `merged` marker.
  */
 export function mergedComment(prUrls: string[]): string {
-  const count = prUrls.length === 1 ? "1 pull request" : `${prUrls.length} pull requests`;
-  return `${markers.merged}\n**🔀 Merged** — ${count} merged to the default branch.\n${prUrls.join("\n")}`;
+  return mergedCommentForCycle(INITIAL_PIPELINE_CYCLE, prUrls);
 }
 
-/**
- * Comment body confirming the hotfix PR(s) merged (hotfix-cycle review done).
- * Like {@link mergedComment}, written by whichever of the reconciler or the
- * deploy webhook observes the merge first.
- */
+/** @deprecated Use {@link mergedCommentForCycle} with {@link HOTFIX_PIPELINE_CYCLE}. */
 export function hotfixMergedComment(prUrls: string[]): string {
-  const count = prUrls.length === 1 ? "1 hotfix pull request" : `${prUrls.length} hotfix pull requests`;
-  return `${markers.hotfixMerged}\n**🔀 Hotfix merged** — ${count} merged to the default branch.\n${prUrls.join("\n")}`;
+  return mergedCommentForCycle(HOTFIX_PIPELINE_CYCLE, prUrls);
 }
 
-/** Hotfix PR URLs recorded by the remediation agents' completion comments. */
-export function hotfixPrUrls(issue: LinearIssuePayload): string[] {
-  return [...parseRemediationResults(issue).values()]
-    .map((result) => result.prUrl)
-    .filter((url): url is string => typeof url === "string" && url.length > 0);
-}
-
-/**
- * True once a remediation agent has actually opened a hotfix PR — the trigger
- * for looping the pipeline back to review. A remediation run that ended with
- * no PR has nothing to review or merge, so it must not re-open the tail stages.
- */
-export function hotfixPrOpened(issue: LinearIssuePayload): boolean {
-  return hasRemediationDone(issue) && hotfixPrUrls(issue).length > 0;
-}
+export { hotfixPrOpened, hotfixPrUrls } from "./cycle.js";
 
 /**
  * Reconciles a single issue's remediation agents (the post-alert track), posting
@@ -758,189 +543,57 @@ export async function reconcileAll(): Promise<ReconcileSummary> {
       );
     }
 
-    // Advance review/merge by confirming the build PR(s) merged on GitHub.
-    await reconcileMerge(issue, spawned, done);
+    for (const cycle of PIPELINE_CYCLES) {
+      await reconcileMergeForCycle(
+        issue,
+        cycle,
+        cycle.requiresBuildDoneForReview ? { spawned, done } : undefined,
+      );
+    }
 
     // Separate track: report any finished remediation agents (hotfix PRs).
     summary.agentsCompleted += await reconcileRemediation(issue);
 
-    // Hotfix cycle: advance the looped-back review stage on the hotfix merge.
-    await reconcileHotfixMerge(issue);
-
-    // Close each verify window when monitoring elapsed with no alerts or verdict.
-    await reconcileVerify(issue, INITIAL_VERIFY_CYCLE);
-    await reconcileVerify(issue, HOTFIX_VERIFY_CYCLE);
+    await reconcileAllVerifyCycles(issue);
   }
   return summary;
 }
 
 /**
- * Advances the merge stage by confirming the build's pull request(s) actually
- * merged on GitHub, so review/merge complete on the real merge rather than
- * waiting for the downstream Vercel deploy. No-ops without a `GH_TOKEN` (the
- * deploy then acts as the merge signal), until the build is done, or until every
- * build PR is merged. Idempotent via the `merged` marker.
+ * Advances one pipeline cycle's merge stage by confirming its PR(s) merged on
+ * GitHub. No-ops without a `GH_TOKEN` (the deploy then acts as the merge
+ * signal). Idempotent via each cycle's merged marker.
  */
-async function reconcileMerge(
+async function reconcileMergeForCycle(
   issue: LinearIssuePayload,
-  spawned: SpawnedAgent[],
-  done: Set<string>,
+  cycle: PipelineCycle,
+  ctx?: { spawned: SpawnedAgent[]; done: Set<string> },
 ): Promise<void> {
-  const allDone = spawned.length > 0 && spawned.every((agent) => done.has(agent.agentId));
-  if (!allDone || hasComment(issue, markers.merged)) return;
+  if (hasComment(issue, cycle.mergedMarker)) return;
 
-  const results = parseAgentResults(issue);
-  const prUrls = spawned
-    .map((agent) => results.get(agent.agentId)?.prUrl)
-    .filter((url): url is string => typeof url === "string" && url.length > 0);
-  // No PRs yet means nothing to merge; a later deploy can still advance the stage.
+  if (cycle.requiresBuildDoneForReview) {
+    const spawned = ctx?.spawned ?? parseSpawnedAgents(issue);
+    const done = ctx?.done ?? parseDoneAgentIds(issue);
+    const allDone = spawned.length > 0 && spawned.every((agent) => done.has(agent.agentId));
+    if (!allDone) return;
+  } else if (!hasRemediationDone(issue)) {
+    return;
+  }
+
+  const prUrls = cycle.prUrls(issue);
   if (prUrls.length === 0) return;
 
   let merged = false;
   try {
     merged = await allPullRequestsMerged(prUrls);
   } catch (err) {
-    console.error(`[merge] PR merge check failed for ${issue.identifier}:`, err);
+    console.error(`[merge] ${cycle.id} PR merge check failed for ${issue.identifier}:`, err);
     return;
   }
   if (!merged) return;
 
-  await postComment(issue.id, mergedComment(prUrls));
-  console.log(`[merge] ${issue.identifier} PR(s) merged → review/merge complete`);
-}
-
-/**
- * Advances the hotfix cycle's looped-back review stage by confirming the hotfix
- * PR(s) merged on GitHub. Mirrors {@link reconcileMerge}: no-ops without a
- * `GH_TOKEN` (the hotfix deploy then acts as the merge signal), before the
- * remediation agent has opened its PR, or once already recorded. Idempotent via
- * the `hotfixMerged` marker.
- */
-async function reconcileHotfixMerge(issue: LinearIssuePayload): Promise<void> {
-  if (!hasRemediationDone(issue) || hasComment(issue, markers.hotfixMerged)) return;
-
-  const prUrls = hotfixPrUrls(issue);
-  if (prUrls.length === 0) return;
-
-  let merged = false;
-  try {
-    merged = await allPullRequestsMerged(prUrls);
-  } catch (err) {
-    console.error(`[merge] hotfix PR merge check failed for ${issue.identifier}:`, err);
-    return;
-  }
-  if (!merged) return;
-
-  await postComment(issue.id, hotfixMergedComment(prUrls));
-  console.log(`[merge] ${issue.identifier} hotfix PR(s) merged → hotfix review complete`);
-}
-
-/**
- * Ends one cycle's verify stage when its verify agent reports a verdict, or
- * when the cycle's post-deploy window passes with no explicit failure
- * (happy-path fallback). The fallback is gated by {@link shouldCloseVerifyWindow}:
- * it stays quiet when a failure was reported out-of-band (initial cycle only —
- * a Datadog alert dispatching remediation) or while the verify run is still
- * active (its verdict is still coming).
- *
- * Independently of the stage verdict, each verify agent's test-plan findings
- * are reported back to Linear/Slack exactly once when its run finishes — even
- * when a verdict/window marker already settled the stage first (the verdict is
- * never re-opened; only the evidence is posted). Idempotent per agent via the
- * `verifyFindings` marker, which the explicit verdict comments stamp inline.
- */
-async function reconcileVerify(issue: LinearIssuePayload, cycle: VerifyCycle): Promise<void> {
-  if (!hasComment(issue, cycle.deployedMarker)) return;
-
-  const verdictSettled = hasComment(issue, cycle.passMarker) || hasComment(issue, cycle.failMarker);
-  const reportedFindings = parseVerifyFindingsIds(issue);
-  const verifyAgents = cycle.parseAgents(issue);
-  let verifyRunActive = false;
-  for (const agent of verifyAgents) {
-    // Nothing left for this agent: verdict settled and findings reported.
-    if (verdictSettled && reportedFindings.has(agent.agentId)) continue;
-
-    const result = await readAgentRunResult(agent.agentId);
-    if (!result) continue;
-    if (!result.terminal) verifyRunActive = true;
-
-    const verdict = result.resultText ? parseVerifyVerdict(result.resultText) : null;
-    if (!verdictSettled && (verdict === "pass" || (result.terminal && verdict !== "fail"))) {
-      const findings = result.resultText?.trim() ?? "Verify agent finished without reporting failures.";
-      // The pass comment embeds the run's findings, so it doubles as the
-      // findings report for this agent (inline marker keeps it single-shot).
-      await postComment(
-        issue.id,
-        `${cycle.passMarker}
-${markers.verifyFindings(agent.agentId)}
-**✅ ${capitalize(cycle.label)} passed** — critical acceptance checks passed on production.
-
-${findings}`,
-      );
-      console.log(`[verify] ${issue.identifier} ${cycle.label} passed`);
-      await postSlack(formatVerifyResultsSlack(issue, cycle.label, "pass", findings));
-      return;
-    }
-
-    if (!verdictSettled && verdict === "fail") {
-      const summary = result.resultText?.trim() ?? "Verify agent reported failed checks.";
-      await postComment(
-        issue.id,
-        `${cycle.failMarker}\n${markers.verifyFindings(agent.agentId)}\n**❌ ${capitalize(cycle.label)} failed**\n\n${summary}`,
-      );
-      console.log(`[verify] ${issue.identifier} ${cycle.label} failed`);
-      await postSlack(formatVerifyResultsSlack(issue, cycle.label, "fail", summary));
-      // Dispatch remediation only when none was dispatched before: the hotfix
-      // cycle's fail must not spawn a second hotfix loop unbounded.
-      if (!hasComment(issue, markers.remediated)) {
-        await spawnRemediationAgent({
-          title: "Verify agent — acceptance checks failed",
-          body: summary,
-          issue,
-        });
-      }
-      return;
-    }
-
-    // Verdict already settled (window fallback or an earlier agent) but this
-    // agent's findings were never posted: report them now, exactly once.
-    if (shouldReportVerifyFindings({ terminal: result.terminal, alreadyReported: reportedFindings.has(agent.agentId) })) {
-      const findings = result.resultText?.trim() ?? "Verify agent finished without reporting findings.";
-      await postComment(issue.id, verifyFindingsComment(agent.agentId, findings));
-      console.log(`[verify] ${issue.identifier} posted findings for ${agent.agentId}`);
-      // The stage verdict already settled (window fallback), so the run's own
-      // verdict line only labels the late report; it never re-opens the stage.
-      await postSlack(formatVerifyResultsSlack(issue, cycle.label, parseVerifyVerdict(findings), findings));
-    }
-  }
-
-  if (verdictSettled) return;
-
-  const windowDecision = shouldCloseVerifyWindow({
-    hasVerifyAgents: verifyAgents.length > 0,
-    windowElapsed: verifyWindowElapsed(issue, Date.now(), observeWindowMs(), cycle),
-    remediated: cycle.failureReported(issue),
-    verifyRunActive,
-  });
-  if (windowDecision.close) {
-    const windowMin = Math.round(observeWindowMs() / 60_000);
-    await postComment(
-      issue.id,
-      `${cycle.passMarker}
-**✅ ${capitalize(cycle.label)} window passed** — no failures reported in the last ${windowMin} min.`,
-    );
-    console.log(`[verify] ${issue.identifier} ${cycle.label} window elapsed with no failure verdict`);
-    await postSlack(
-      statusBlocks(`✅ ${issue.identifier} — ${cycle.label} window passed`, [
-        issue.title,
-        `No verify failures during the ${windowMin}-minute window.`,
-      ]),
-    );
-  }
-}
-
-function capitalize(text: string): string {
-  return text.charAt(0).toUpperCase() + text.slice(1);
+  await postComment(issue.id, mergedCommentForCycle(cycle, prUrls));
+  console.log(`[merge] ${issue.identifier} ${cycle.id} PR(s) merged → review complete`);
 }
 
 /** Minimum gap between opportunistic reconciles kicked off by dashboard polls. */
