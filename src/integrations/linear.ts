@@ -60,8 +60,12 @@ const ISSUE_FIELDS = `
   url
   state { name }
   labels { nodes { name } }
-  comments(first: 100) { nodes { body createdAt } }
 `;
+
+async function hydrateIssueComments(issue: LinearIssueRecord): Promise<LinearIssuePayload> {
+  const comments = await fetchAllIssueComments(issue.id);
+  return normalizeIssue({ ...issue, comments: { nodes: comments } });
+}
 
 export async function fetchIssue(issueId: string): Promise<LinearIssuePayload | null> {
   try {
@@ -69,7 +73,7 @@ export async function fetchIssue(issueId: string): Promise<LinearIssuePayload | 
       `query DemoIssue($id: String!) { issue(id: $id) { ${ISSUE_FIELDS} } }`,
       { id: issueId },
     );
-    return data.issue ? normalizeIssue(data.issue) : null;
+    return data.issue ? hydrateIssueComments(data.issue) : null;
   } catch (err) {
     if (String(err).includes("Entity not found: Issue")) return null;
     throw err;
@@ -86,7 +90,7 @@ export async function listFleetIssues(label: string): Promise<LinearIssuePayload
     }`,
     { label },
   );
-  return data.issues.nodes.map(normalizeIssue);
+  return Promise.all(data.issues.nodes.map(hydrateIssueComments));
 }
 
 export async function postComment(issueId: string, body: string): Promise<void> {
@@ -338,10 +342,12 @@ export async function removeIssueReaction(issueId: string): Promise<void> {
   }
 }
 
+type IssueCommentNode = { id: string; body?: string | null; createdAt?: string };
+
 type IssueCommentsPage = {
   issue: {
     comments: {
-      nodes: Array<{ id: string; body?: string | null }>;
+      nodes: IssueCommentNode[];
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
     };
   } | null;
@@ -350,7 +356,7 @@ type IssueCommentsPage = {
 const ISSUE_COMMENTS_PAGE = `query($id: String!, $after: String) {
   issue(id: $id) {
     comments(first: 100, after: $after) {
-      nodes { id body }
+      nodes { id body createdAt }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -361,6 +367,36 @@ async function fetchIssueCommentsPage(issueId: string, after?: string | null): P
   return linearGraphql<IssueCommentsPage>(ISSUE_COMMENTS_PAGE, { id: issueId, after: after ?? null });
 }
 
+/** Paginates through every comment on an issue (reconcile/board need the full thread). */
+export async function fetchAllIssueComments(issueId: string): Promise<IssueCommentNode[]> {
+  const comments: IssueCommentNode[] = [];
+  let after: string | null = null;
+  let hasNextPage = true;
+  while (hasNextPage) {
+    const data = await fetchIssueCommentsPage(issueId, after);
+    const page = data.issue?.comments;
+    comments.push(...(page?.nodes ?? []));
+    hasNextPage = page?.pageInfo.hasNextPage ?? false;
+    after = page?.pageInfo.endCursor ?? null;
+  }
+  return comments;
+}
+
+/**
+ * Cursor for the next comments page after deleting some rows on the current page.
+ * When the page cursor itself was deleted, restart from the head so no comments
+ * are skipped as the list compacts.
+ */
+export function nextCommentsPageAfterDeletes(
+  endCursor: string | null,
+  deletedIds: ReadonlySet<string>,
+  hasNextPage: boolean,
+): { after: string | null; done: boolean } {
+  if (!hasNextPage) return { after: null, done: true };
+  if (endCursor && deletedIds.has(endCursor)) return { after: null, done: false };
+  return { after: endCursor, done: false };
+}
+
 /**
  * Deletes every bridge-authored comment on an issue, re-arming it so a fresh
  * drag into "In Progress" launches a new fleet. Returns the number removed.
@@ -369,39 +405,44 @@ export async function deleteBridgeComments(issueId: string): Promise<number> {
   if (!linearKey()) return 0;
   let cleared = 0;
   let after: string | null = null;
-  let hasNextPage = true;
-  while (hasNextPage) {
+  let done = false;
+  while (!done) {
     const data = await fetchIssueCommentsPage(issueId, after);
     const page = data.issue?.comments;
+    const endCursor = page?.pageInfo.endCursor ?? null;
     const bridgeComments = (page?.nodes ?? []).filter((c) => isBridgeComment(c.body));
+    const deletedIds = new Set<string>();
     for (const comment of bridgeComments) {
       await linearGraphql(`mutation($id: String!) { commentDelete(id: $id) { success } }`, { id: comment.id });
+      deletedIds.add(comment.id);
       cleared += 1;
     }
-    hasNextPage = page?.pageInfo.hasNextPage ?? false;
-    after = page?.pageInfo.endCursor ?? null;
+    const next = nextCommentsPageAfterDeletes(
+      endCursor,
+      deletedIds,
+      page?.pageInfo.hasNextPage ?? false,
+    );
+    after = next.after;
+    done = next.done;
   }
   return cleared;
 }
 
 /**
- * Deletes every comment on an issue (demo reset). Paginates so tickets with
- * more than 100 comments are fully cleared. Returns the number removed.
+ * Deletes every comment on an issue (demo reset). Re-fetches from the head each
+ * loop so deletions never advance past a cursor that was just removed.
  */
 export async function deleteAllComments(issueId: string): Promise<number> {
   if (!linearKey()) return 0;
   let cleared = 0;
-  let after: string | null = null;
-  let hasNextPage = true;
-  while (hasNextPage) {
-    const data = await fetchIssueCommentsPage(issueId, after);
-    const page = data.issue?.comments;
-    for (const comment of page?.nodes ?? []) {
+  while (true) {
+    const data = await fetchIssueCommentsPage(issueId, null);
+    const nodes = data.issue?.comments?.nodes ?? [];
+    if (nodes.length === 0) break;
+    for (const comment of nodes) {
       await linearGraphql(`mutation($id: String!) { commentDelete(id: $id) { success } }`, { id: comment.id });
       cleared += 1;
     }
-    hasNextPage = page?.pageInfo.hasNextPage ?? false;
-    after = page?.pageInfo.endCursor ?? null;
   }
   return cleared;
 }

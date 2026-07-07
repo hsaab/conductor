@@ -13,6 +13,7 @@ import {
   hasComment,
   isBridgeComment,
   issueRefFromBody,
+  nextCommentsPageAfterDeletes,
   parseDoneAgentIds,
   parseSpawnedAgents,
   parseTestPlan,
@@ -120,4 +121,27 @@ test("bridgeReactionId is deterministic, unique per issue, and UUID-shaped", () 
   assert.equal(a, bridgeReactionId("issue-1"));
   assert.notEqual(a, bridgeReactionId("issue-2"));
   assert.match(a, uuid);
+});
+
+test("nextCommentsPageAfterDeletes restarts from head when the page cursor was deleted", () => {
+  const deleted = new Set(["cursor-100"]);
+  assert.deepEqual(nextCommentsPageAfterDeletes("cursor-100", deleted, true), {
+    after: null,
+    done: false,
+  });
+});
+
+test("nextCommentsPageAfterDeletes advances the cursor when it was not deleted", () => {
+  const deleted = new Set(["comment-1"]);
+  assert.deepEqual(nextCommentsPageAfterDeletes("cursor-100", deleted, true), {
+    after: "cursor-100",
+    done: false,
+  });
+});
+
+test("nextCommentsPageAfterDeletes stops when there is no next page", () => {
+  assert.deepEqual(nextCommentsPageAfterDeletes("cursor-100", new Set(), false), {
+    after: null,
+    done: true,
+  });
 });
