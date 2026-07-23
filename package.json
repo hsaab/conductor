@@ -10,6 +10,7 @@
     "test": "node --import tsx --test src/**/*.test.ts",
     "setup": "node --env-file=.env scripts/setup-new-workspace.mjs",
     "reset-demo": "node --env-file-if-exists=.env scripts/reset-demo.mjs",
+    "reset-demo:hotfix": "node --env-file-if-exists=.env scripts/reset-demo.mjs hotfix",
     "restore-baseline": "node --env-file-if-exists=.env scripts/restore-baseline.mjs",
     "verify:sdk": "node scripts/verify-sdk.mjs",
     "postinstall": "node scripts/verify-sdk.mjs"

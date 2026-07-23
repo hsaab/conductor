@@ -311,12 +311,12 @@ provide real, recent artifacts. Keep the reconcile loop (5.1) running throughout
 
 ## 7. Reset / re-arm between rehearsals
 
-Two start modes via `DEMO_START_MODE`:
+Two start modes (chosen by the `reset-demo-state` skill from user intent, not an env var):
 
-- `feature` (default): tickets to Backlog, board empty, baseline must be fast.
-- `hotfix`: after reset, triggers a real FE-13 fleet, waits for its PR (does **not**
-  merge), fingerprints the PR head, and leaves FE-13 mid-pipeline for the presenter
-  to merge live as the opening beat.
+- **feature** (`pnpm reset-demo`): tickets to Backlog, board empty, baseline must be fast.
+- **hotfix** (`pnpm reset-demo:hotfix`): after reset, triggers a real FE-13 fleet, waits for
+  its PR (does **not** merge), fingerprints the PR head, and leaves FE-13 mid-pipeline
+  for the presenter to merge live as the opening beat.
 
 Re-arming via `/api/reset` wipes **all** comments + the 🚀 reaction so a fresh
 drag relaunches a fleet. (Dragging a ticket out of "In Progress" only clears

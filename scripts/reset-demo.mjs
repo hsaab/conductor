@@ -3,18 +3,22 @@
  * Reset the conductor closed-loop demo back to a clean, armed starting state.
  *
  * Surfaces:
- *  1. Linear tickets — wipe comments + reaction, move to Backlog (feature mode)
- *     or arm FE-13 mid-pipeline (hotfix mode).
+ *  1. Linear tickets — wipe comments + reaction, move to Backlog (feature)
+ *     or arm FE-13 mid-pipeline (hotfix).
  *  2. Conductor — derived from Linear markers; board check is mode-aware.
  *  3. Target app — gate on fast /api/market/quotes baseline (never mutates main).
  *
- * Modes (`DEMO_START_MODE`):
+ * Mode is a CLI argument (not an env var). The reset-demo-state skill picks it
+ * from user intent:
  *  - feature (default): tickets in Backlog, board empty, baseline must be fast.
  *  - hotfix: after reset, trigger a real FE-13 fleet, wait for its PR (do not
  *    merge), assert the PR head carries the regression fingerprint. Presenter
  *    merges live as the opening beat.
  *
- * Usage: pnpm reset-demo
+ * Usage:
+ *   pnpm reset-demo
+ *   pnpm reset-demo:hotfix
+ *   node scripts/reset-demo.mjs hotfix
  */
 
 import {
@@ -36,7 +40,6 @@ const {
   RESET_TARGET_STATE = "Backlog",
   RESPONSE_TIME_MS = "1500",
   ALLOW_SLOW_BASELINE,
-  DEMO_START_MODE = "feature",
   HOTFIX_TICKET = "FE-13",
   HOTFIX_ARM_TIMEOUT_MS = "900000",
 } = process.env;
@@ -47,6 +50,28 @@ function requireEnv(name, value) {
     process.exit(1);
   }
   return value;
+}
+
+/** Parse `feature` | `hotfix` from argv (`hotfix`, `--mode=hotfix`, `--hotfix`). */
+function parseStartMode(argv) {
+  const args = argv.slice(2).map((a) => a.trim().toLowerCase()).filter(Boolean);
+  for (const arg of args) {
+    if (arg === "hotfix" || arg === "--hotfix" || arg === "--mode=hotfix") return "hotfix";
+    if (arg === "feature" || arg === "--feature" || arg === "--mode=feature") return "feature";
+    if (arg.startsWith("--mode=")) {
+      const mode = arg.slice("--mode=".length);
+      if (mode === "feature" || mode === "hotfix") return mode;
+      console.error(`x Unknown mode "${mode}" (use feature or hotfix)`);
+      process.exit(1);
+    }
+    if (arg === "--help" || arg === "-h") {
+      console.log("Usage: pnpm reset-demo [feature|hotfix]");
+      process.exit(0);
+    }
+    console.error(`x Unknown argument "${arg}" (use feature or hotfix)`);
+    process.exit(1);
+  }
+  return "feature";
 }
 
 requireEnv("BRIDGE_URL", BRIDGE_URL);
@@ -60,11 +85,7 @@ const allowSlowBaseline = ["1", "true", "yes"].includes(
   (ALLOW_SLOW_BASELINE ?? "").trim().toLowerCase(),
 );
 const githubToken = GH_TOKEN || GITHUB_TOKEN;
-const startMode = (DEMO_START_MODE || "feature").trim().toLowerCase();
-if (startMode !== "feature" && startMode !== "hotfix") {
-  console.error(`x DEMO_START_MODE must be "feature" or "hotfix" (got "${DEMO_START_MODE}")`);
-  process.exit(1);
-}
+const startMode = parseStartMode(process.argv);
 
 async function linearGraphql(query, variables = {}) {
   const res = await fetch("https://api.linear.app/graphql", {
