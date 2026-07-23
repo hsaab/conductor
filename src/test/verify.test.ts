@@ -175,6 +175,8 @@ const STRUCTURED_FINDINGS = [
   "",
   "### 1. Portfolio load shows live prices — **PASS**",
   "AAPL matched GLOBAL_QUOTE.",
+  "#### Observed behavior",
+  "Prices updated on load.",
   "",
   "### 2. Quote refresh under 1s - FAIL",
   "Refresh took 3.2s.",
@@ -189,10 +191,11 @@ test("parseVerifyFindings splits cases, statuses, evidence, preamble, and verdic
   const parsed = parseVerifyFindings(STRUCTURED_FINDINGS);
 
   assert.equal(parsed.cases.length, 3);
+  // A mid-case sub-heading is evidence (prefix stripped), not a new case.
   assert.deepEqual(parsed.cases[0], {
     title: "1. Portfolio load shows live prices",
     status: "pass",
-    evidence: ["AAPL matched GLOBAL_QUOTE."],
+    evidence: ["AAPL matched GLOBAL_QUOTE.", "Observed behavior", "Prices updated on load."],
   });
   // Plain hyphen and unbolded status still parse.
   assert.deepEqual(parsed.cases[1], {
@@ -249,20 +252,24 @@ test("formatVerifyResultsSlack renders one Block Kit section per parsed case", (
   });
   assert.equal(
     blocks[1].text?.text,
-    "*T*\n1/2 checks passed\n<https://linear.app/acme/issue/ENG-9|View on Linear>",
+    "*T*\nVerified against production.\n1/2 checks passed\n<https://linear.app/acme/issue/ENG-9|View on Linear>",
   );
   assert.equal(blocks[2].type, "divider");
 
   const sections = blocks.filter((b) => b.type === "section").map((b) => b.text?.text ?? "");
-  assert.ok(sections.includes("✅ *1. Portfolio load shows live prices*\nAAPL matched GLOBAL_QUOTE."));
+  assert.ok(
+    sections.includes(
+      "✅ *1. Portfolio load shows live prices*\nAAPL matched GLOBAL_QUOTE.\nObserved behavior\nPrices updated on load.",
+    ),
+  );
   assert.ok(sections.includes("❌ *2. Quote refresh under 1s*\nRefresh took 3.2s."));
   assert.ok(sections.includes("▫️ *3. Notes*\nManual follow-up needed."));
 
   const contexts = blocks.filter((b) => b.type === "context").map((b) => b.elements?.[0]?.text);
   assert.deepEqual(contexts, ["VERIFY_RESULT: FAIL — 1 of 2 cases failed", "conductor"]);
 
-  // Notification fallback text: headline, title, one line per case, verdict.
-  assert.match(msg.text, /^❌ ENG-9 · verify failed\nT\n/);
+  // Notification fallback text: headline, title, preamble, one line per case, verdict.
+  assert.match(msg.text, /^❌ ENG-9 · verify failed\nT\nVerified against production\.\n/);
   assert.ok(msg.text.includes("✅ 1. Portfolio load shows live prices"));
   assert.ok(msg.text.includes("VERIFY_RESULT: FAIL — 1 of 2 cases failed"));
   assert.ok(!msg.text.includes("###"));

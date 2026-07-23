@@ -62,7 +62,7 @@ export interface VerifyCaseResult {
   /** Heading text without the `###` prefix and without the PASS/FAIL suffix. */
   title: string;
   status: "pass" | "fail" | null;
-  /** Trimmed non-empty lines under the heading. */
+  /** Trimmed non-empty lines under the heading, `#` heading prefixes stripped. */
   evidence: string[];
 }
 
@@ -75,7 +75,10 @@ export interface ParsedVerifyFindings {
   preamble: string[];
 }
 
-const CASE_HEADING = /^#{1,6}\s+(.+)$/;
+// Only numbered headings (`### 1. …`, `## 2) …`) start a case; sub-headings like
+// `#### Observed behavior` belong to the current case's evidence.
+const CASE_HEADING = /^#{1,6}\s+(\d+[.)].*)$/;
+const HEADING_PREFIX = /^#{1,6}\s+/;
 // The dash may be an em dash, en dash, or hyphen; the LLM sometimes drops the bold.
 const CASE_STATUS_SUFFIX = /\s*[—–-]\s*\*{0,2}(PASS|FAIL)\*{0,2}\s*$/i;
 const VERDICT_LINE = /^VERIFY_RESULT:\s*(?:PASS|FAIL)\b\s*(?:[—–-]\s*(.*))?$/i;
@@ -111,14 +114,14 @@ export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
       continue;
     }
 
-    (cases.length > 0 ? cases[cases.length - 1].evidence : preamble).push(line);
+    (cases.length > 0 ? cases[cases.length - 1].evidence : preamble).push(line.replace(HEADING_PREFIX, ""));
   }
 
   return { cases, verdictSummary, preamble };
 }
 
 const MAX_RENDERED_CASES = 10;
-const EVIDENCE_CHAR_CAP = 300;
+const MRKDWN_SNIPPET_CHAR_CAP = 300;
 /** Keep the notification/screen-reader fallback text under Slack's ~3000-char comfort zone. */
 const SLACK_TEXT_CHAR_CAP = 3000;
 
@@ -126,11 +129,10 @@ function caseEmoji(status: VerifyCaseResult["status"]): string {
   return status === "pass" ? "✅" : status === "fail" ? "❌" : "▫️";
 }
 
-function evidenceToMrkdwn(evidence: string[]): string {
-  const text = evidence
-    .map((line) => line.replace(/^#{1,6}\s+/, "").replace(/\*\*/g, "*"))
-    .join("\n");
-  return text.length > EVIDENCE_CHAR_CAP ? `${text.slice(0, EVIDENCE_CHAR_CAP)}…` : text;
+/** Joins parsed lines (evidence or preamble) into a capped mrkdwn snippet. */
+function mrkdwnSnippet(lines: string[]): string {
+  const text = lines.map((line) => line.replace(/\*\*/g, "*")).join("\n");
+  return text.length > MRKDWN_SNIPPET_CHAR_CAP ? `${text.slice(0, MRKDWN_SNIPPET_CHAR_CAP)}…` : text;
 }
 
 function mrkdwnSection(text: string): { type: "section"; text: { type: "mrkdwn"; text: string } } {
@@ -191,7 +193,9 @@ export function formatVerifyResultsSlack(
   const casesWithStatus = parsed.cases.filter((c) => c.status !== null);
   const passCount = casesWithStatus.filter((c) => c.status === "pass").length;
 
+  const preamble = mrkdwnSnippet(parsed.preamble);
   const summaryLines = [`*${issue.title}*`];
+  if (preamble) summaryLines.push(preamble);
   if (casesWithStatus.length > 0) {
     summaryLines.push(`${passCount}/${casesWithStatus.length} checks passed`);
   }
@@ -201,7 +205,7 @@ export function formatVerifyResultsSlack(
   const remaining = parsed.cases.length - renderedCases.length;
 
   const caseSections = renderedCases.map((c) => {
-    const evidence = evidenceToMrkdwn(c.evidence);
+    const evidence = mrkdwnSnippet(c.evidence);
     return mrkdwnSection(`${caseEmoji(c.status)} *${c.title}*${evidence ? `\n${evidence}` : ""}`);
   });
   if (remaining > 0) {
@@ -214,7 +218,9 @@ export function formatVerifyResultsSlack(
     ? `VERIFY_RESULT: ${(verdict ?? parseVerifyVerdict(findings)) === "fail" ? "FAIL" : "PASS"} — ${parsed.verdictSummary}`
     : null;
 
-  const textLines = [headline, issue.title, ...renderedCases.map((c) => `${caseEmoji(c.status)} ${c.title}`)];
+  const textLines = [headline, issue.title];
+  if (preamble) textLines.push(preamble);
+  textLines.push(...renderedCases.map((c) => `${caseEmoji(c.status)} ${c.title}`));
   if (verdictLine) textLines.push(verdictLine);
   const text = textLines.join("\n");
 
