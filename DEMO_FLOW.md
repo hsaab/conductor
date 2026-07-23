@@ -311,7 +311,8 @@ provide real, recent artifacts. Keep the reconcile loop (5.1) running throughout
 
 ## 7. Reset / re-arm between rehearsals
 
-Two start modes (chosen by the `rearm-demo` skill, which asks beginning vs hotfix):
+Two start modes (the `rearm-demo` skill in the compound repo, or conductor's
+`reset-demo-state`, asks beginning vs hotfix):
 
 - **feature** (`pnpm reset-demo`): tickets to Backlog, board empty, baseline must be fast.
 - **hotfix** (`pnpm reset-demo:hotfix`): after reset, triggers a real FE-13 fleet, waits for
