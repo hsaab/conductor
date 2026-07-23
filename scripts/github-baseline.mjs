@@ -129,9 +129,19 @@ function inDetectionDir(path, dirs = DETECTION_DIRS) {
   return dirs.some((d) => path.startsWith(d) || path === d.replace(/\/$/, ""));
 }
 
+function isTestPath(path) {
+  return (
+    path.includes("/__tests__/") ||
+    path.endsWith(".test.ts") ||
+    path.endsWith(".test.tsx") ||
+    path.endsWith(".spec.ts")
+  );
+}
+
 /**
  * Fingerprint whether `ref` carries the FE-13 TTL / paced-quotes regression.
  * Scans DETECTION_DIRS for positive markers; restore surface stays exact-file.
+ * Test files are skipped for pacing-sleep markers (they often use setTimeout).
  */
 export async function detectRegression(gh, ref, opts = {}) {
   const surfaceFiles = opts.surfaceFiles ?? REGRESSION_SURFACE_FILES;
@@ -144,7 +154,7 @@ export async function detectRegression(gh, ref, opts = {}) {
   const tree = await treeFor(gh, ref);
   const scanPaths = new Set(surfaceFiles);
   for (const path of tree.byPath.keys()) {
-    if (inDetectionDir(path, detectionDirs)) scanPaths.add(path);
+    if (inDetectionDir(path, detectionDirs) && !isTestPath(path)) scanPaths.add(path);
   }
 
   const entries = await Promise.all(
@@ -155,6 +165,7 @@ export async function detectRegression(gh, ref, opts = {}) {
   const positive = [];
   for (const [path, content] of entries) {
     if (content === null) continue;
+    if (isTestPath(path)) continue;
     if (addedFiles.includes(path)) positive.push(`${path} present (regression-only file)`);
     for (const marker of markers) {
       if (marker.path && marker.path !== path) continue;
