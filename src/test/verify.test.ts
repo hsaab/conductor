@@ -232,6 +232,128 @@ test("parseVerifyFindings puts unparseable input in the preamble with zero cases
   assert.deepEqual(parsed.preamble, ["the agent rambled", "without any headings"]);
 });
 
+// Live FE-13 shape: plain `Case N — title — STATUS` (no ###), PARTIAL FAIL, --- separators,
+// glued same-line evidence after FAIL, and a standalone Verdict label before VERIFY_RESULT.
+const FE13_FINDINGS = [
+  "FE-13 post-deploy verification",
+  "Site: https://compound-ce0mk0dz6-hassansaab-9511s-projects.vercel.app",
+  "When: Thu Jul 23, 2026 ~23:11 UTC (US market closed; asOf = 2026-07-23T21:00:00.000Z)",
+  "---",
+  "Case 1 — Back-to-back quotes always live — FAIL",
+  "| Call | durationMs | ok | Cache-Control | AAPL / MSFT |",
+  "|------|-------------|------|-----------------|-------------|",
+  "| 1 | 238 | true | no-store | price 321.66 / 381.58 |",
+  "| 2 (+2s) | 0 | true | no-store | same prices + same asOf |",
+  "Repeat call durationMs=0 = in-memory TTL cache hit, not second upstream fetch. Header no-store OK; live-on-every-call not met.",
+  "---",
+  "Case 2 — Multi-ticker sequential, paced ≥250ms — FAIL",
+  "| Request | Tickers | 1st call durationMs | Wall | Min sequential |",
+  "|---------|---------|----------------------|------|----------------|",
+  "| Cold-ish | KO, PEP, COST | 93 | ~170ms | ≥500ms |",
+  "Multi-symbol cold fetches finish in tens–low hundreds of ms. Pattern matches concurrent fan-out + TTL cache.",
+  "---",
+  "Case 3 — Closed-market bypasses quote cache — FAILNVDA call 1: durationMs=0  price=208.76  asOf=2026-07-23T21:00:00.000Z",
+  "NVDA call 2: durationMs=0  price=208.76  asOf=2026-07-23T21:00:00.000Z",
+  "Both instant cache hits on closed market. 15min closed-market TTL still active; no live upstream per call.",
+  "---",
+  "Case 4 — Holdings live poll uses fresh path — FAIL",
+  "- Auth OK: /holdings → 200 after seed-user login.",
+  "- Simulated 12-ticker holdings poll (same endpoint useLiveQuotes hits):",
+  "| Poll | durationMs | Resolved |",
+  "|------|-------------|----------|",
+  "| 1 | 10490 | 11/12 |",
+  "| 2 (+2s) | 42 | 12/12 |",
+  "Poll 2 ~42ms with unchanged prices/asOf = cached quotes, not fresh upstream.",
+  "---",
+  "Case 5 — Datadog synthetic basket — PARTIAL FAILGET /api/market/quotes?tickers=<20-ticker basket>",
+  "→ HTTP 200, ok:true, durationMs=85, resolved=11/20, degraded=false",
+  "GET /api/market/quotes-check → HTTP 404 ✓",
+  "Pass: 200, ok:true, durationMs present, no quotes-check.",
+  "Fail: 85ms for 20 symbols (not slow sequential live path); only 11/20 resolved.",
+  "---",
+  "Verdict",
+  "Deployed site still shows TTL quote cache (repeat durationMs=0) and fast multi-ticker responses inconsistent with sequential ≥250ms pacing. FE-13 acceptance criteria not met on production.",
+  "VERIFY_RESULT: FAIL - Quote TTL cache still active (repeat calls durationMs=0); multi-ticker requests not sequentially paced and holdings/synthetic polls reuse cached quotes instead of live upstream fetches.",
+].join("\n");
+
+test("parseVerifyFindings accepts plain Case N headings, PARTIAL FAIL, and skips --- / Verdict", () => {
+  const parsed = parseVerifyFindings(FE13_FINDINGS);
+
+  assert.equal(parsed.cases.length, 5);
+  assert.deepEqual(
+    parsed.cases.map((c) => ({ title: c.title, status: c.status })),
+    [
+      { title: "Case 1 — Back-to-back quotes always live", status: "fail" },
+      { title: "Case 2 — Multi-ticker sequential, paced ≥250ms", status: "fail" },
+      { title: "Case 3 — Closed-market bypasses quote cache", status: "fail" },
+      { title: "Case 4 — Holdings live poll uses fresh path", status: "fail" },
+      { title: "Case 5 — Datadog synthetic basket", status: "fail" },
+    ],
+  );
+  // Same-line evidence after a glued FAIL token stays on that case.
+  assert.ok(parsed.cases[2].evidence[0]?.startsWith("NVDA call 1:"));
+  assert.ok(parsed.cases[4].evidence[0]?.startsWith("GET /api/market/quotes?tickers="));
+  // Separators and the Verdict label never land in evidence; post-Verdict narrative is omitted.
+  for (const c of parsed.cases) {
+    assert.ok(!c.evidence.some((line) => line === "---" || /^-+$/.test(line)));
+    assert.ok(!c.evidence.some((line) => /^verdict$/i.test(line)));
+    assert.ok(!c.evidence.some((line) => /acceptance criteria not met/i.test(line)));
+  }
+  assert.deepEqual(parsed.preamble, [
+    "FE-13 post-deploy verification",
+    "Site: https://compound-ce0mk0dz6-hassansaab-9511s-projects.vercel.app",
+    "When: Thu Jul 23, 2026 ~23:11 UTC (US market closed; asOf = 2026-07-23T21:00:00.000Z)",
+  ]);
+  assert.equal(parsed.verdictStatus, "fail");
+  assert.match(parsed.verdictSummary ?? "", /Quote TTL cache still active/);
+});
+
+test("parseVerifyFindings uses the rightmost status marker when a case title contains PASS or FAIL", () => {
+  const parsed = parseVerifyFindings(
+    [
+      "Case 1 — PASS criteria remain unmet — FAIL",
+      "Observed failure.",
+      "Case 2 — Non-FAIL response handling — PASS",
+      "Observed success.",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    parsed.cases.map(({ title, status }) => ({ title, status })),
+    [
+      { title: "Case 1 — PASS criteria remain unmet", status: "fail" },
+      { title: "Case 2 — Non-FAIL response handling", status: "pass" },
+    ],
+  );
+});
+
+test("formatVerifyResultsSlack renders FE-13 plain-case findings as scannable Block Kit", () => {
+  const iss = {
+    ...issue([]),
+    identifier: "FE-13",
+    title: "Always fetch live quotes on /api/market/quotes",
+    url: "https://linear.app/acme/issue/FE-13",
+  };
+  const msg = formatVerifyResultsSlack(iss, "verify", "fail", FE13_FINDINGS);
+  const blocks = blocksOf(msg);
+
+  assert.equal(blocks[0].text?.text, "❌ FE-13 · verify failed");
+  assert.match(blocks[1].text?.text ?? "", /0\/5 checks passed/);
+  assert.match(blocks[1].text?.text ?? "", /View on Linear/);
+
+  const sections = blocks.filter((b) => b.type === "section").map((b) => b.text?.text ?? "");
+  assert.ok(sections.some((t) => t.startsWith("❌ *Case 1 — Back-to-back quotes always live*")));
+  assert.ok(sections.some((t) => t.startsWith("❌ *Case 5 — Datadog synthetic basket*")));
+  // Prose preferred over markdown tables in the Slack snippet.
+  const case1 = sections.find((t) => t.includes("Case 1 — Back-to-back")) ?? "";
+  assert.ok(case1.includes("Repeat call durationMs=0"));
+  assert.ok(!case1.includes("| Call | durationMs"));
+  // Flat dump of raw findings must not win.
+  assert.equal(blocks[0].type, "header");
+  assert.ok(!msg.text.includes("Case 1 — Back-to-back quotes always live — FAIL"));
+  assert.match(msg.text, /VERIFY_RESULT: FAIL — Quote TTL cache still active/);
+});
+
 // --- formatVerifyResultsSlack: per-case verify results posted to Slack ---
 
 interface TestBlock {

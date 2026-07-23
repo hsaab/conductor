@@ -77,13 +77,39 @@ export interface ParsedVerifyFindings {
   preamble: string[];
 }
 
-// Only numbered headings (`### 1. …`, `## 2) …`) start a case; sub-headings like
-// `#### Observed behavior` belong to the current case's evidence.
-const CASE_HEADING = /^#{1,6}\s+(\d+[.)].*)$/;
+// Numbered markdown headings (`### 1. …`) or plain `Case N — …` start a case.
+// Sub-headings like `#### Observed behavior` stay in the current case's evidence.
+const MARKDOWN_CASE_HEADING = /^#{1,6}\s+(\d+[.)].*)$/;
+const PLAIN_CASE_HEADING = /^Case\s+\d+\s*[—–-]\s*.+/i;
 const HEADING_PREFIX = /^#{1,6}\s+/;
-// The dash may be an em dash, en dash, or hyphen; the LLM sometimes drops the bold.
-const CASE_STATUS_SUFFIX = /\s*[—–-]\s*\*{0,2}(PASS|FAIL)\*{0,2}\s*$/i;
+// Greedy title capture selects the rightmost status marker while still allowing
+// same-line evidence glued after it (`— FAILNVDA…`).
+const CASE_STATUS_TAIL =
+  /^(.+)\s*[—–-]\s*\*{0,2}(PARTIAL\s+FAIL|PASS|FAIL)\*{0,2}\s*(.*)$/i;
+const SKIP_AS_EVIDENCE = /^(?:-{3,}|\*{0,2}Verdict\*{0,2}:?)$/i;
 const VERDICT_LINE = /^VERIFY_RESULT:\s*(PASS|FAIL)\b\s*(?:[—–-]\s*(.*))?$/i;
+
+function mapCaseStatus(token: string): "pass" | "fail" {
+  return /fail/i.test(token) ? "fail" : "pass";
+}
+
+/** Splits a case heading body into title, status, and any same-line evidence. */
+function splitCaseHeading(body: string): {
+  title: string;
+  status: VerifyCaseResult["status"];
+  sameLineEvidence: string | null;
+} {
+  const matched = body.match(CASE_STATUS_TAIL);
+  if (!matched) {
+    return { title: body.trim(), status: null, sameLineEvidence: null };
+  }
+  const rest = matched[3]?.trim() || null;
+  return {
+    title: matched[1].trim(),
+    status: mapCaseStatus(matched[2]),
+    sameLineEvidence: rest,
+  };
+}
 
 /**
  * Parses the verify agent's findings markdown into per-case results. Findings
@@ -95,6 +121,8 @@ export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
   const preamble: string[] = [];
   let verdictStatus: ParsedVerifyFindings["verdictStatus"] = null;
   let verdictSummary: string | null = null;
+  // After a standalone Verdict label, skip narrative until VERIFY_RESULT (full text stays on Linear).
+  let afterVerdictLabel = false;
 
   for (const raw of findings.split("\n")) {
     const line = raw.trim();
@@ -104,16 +132,23 @@ export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
     if (verdict) {
       verdictStatus = verdict[1].toUpperCase() === "FAIL" ? "fail" : "pass";
       verdictSummary = verdict[2]?.trim() || null;
+      afterVerdictLabel = false;
       continue;
     }
 
-    const heading = line.match(CASE_HEADING);
-    if (heading) {
-      const status = heading[1].match(CASE_STATUS_SUFFIX);
+    if (SKIP_AS_EVIDENCE.test(line)) {
+      if (/verdict/i.test(line)) afterVerdictLabel = true;
+      continue;
+    }
+    if (afterVerdictLabel) continue;
+
+    const markdown = line.match(MARKDOWN_CASE_HEADING);
+    if (markdown || PLAIN_CASE_HEADING.test(line)) {
+      const { title, status, sameLineEvidence } = splitCaseHeading(markdown ? markdown[1] : line);
       cases.push({
-        title: heading[1].replace(CASE_STATUS_SUFFIX, "").trim(),
-        status: status ? (status[1].toUpperCase() === "PASS" ? "pass" : "fail") : null,
-        evidence: [],
+        title,
+        status,
+        evidence: sameLineEvidence ? [sameLineEvidence] : [],
       });
       continue;
     }
@@ -139,6 +174,12 @@ function caseEmoji(status: VerifyCaseResult["status"]): string {
 function capText(text: string, cap: number): string {
   const chars = [...text];
   return chars.length > cap ? `${chars.slice(0, cap).join("")}…` : text;
+}
+
+/** Prefer prose over markdown table rows so Slack digests stay scannable. */
+function evidenceForSlack(lines: string[]): string[] {
+  const prose = lines.filter((line) => !line.startsWith("|"));
+  return prose.length > 0 ? prose : lines;
 }
 
 /** Joins parsed lines (evidence or preamble) into a capped mrkdwn snippet. */
@@ -217,7 +258,7 @@ export function formatVerifyResultsSlack(
   const remaining = parsed.cases.length - renderedCases.length;
 
   const caseSections = renderedCases.map((c) => {
-    const evidence = mrkdwnSnippet(c.evidence);
+    const evidence = mrkdwnSnippet(evidenceForSlack(c.evidence));
     return mrkdwnSection(`${caseEmoji(c.status)} *${capText(c.title, TITLE_CHAR_CAP)}*${evidence ? `\n${evidence}` : ""}`);
   });
   if (remaining > 0) {
