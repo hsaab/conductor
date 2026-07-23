@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   formatVerifyResultsSlack,
+  parseVerifyFindings,
   shouldCloseVerifyWindow,
   shouldReportVerifyFindings,
   verifyFindingsComment,
@@ -167,41 +168,140 @@ test("verifyWindowElapsed scopes the hotfix cycle to the hotfix deploy and spawn
   );
 });
 
+// --- parseVerifyFindings: typed parse of the verify agent's markdown ---
+
+const STRUCTURED_FINDINGS = [
+  "Verified against production.",
+  "",
+  "### 1. Portfolio load shows live prices — **PASS**",
+  "AAPL matched GLOBAL_QUOTE.",
+  "",
+  "### 2. Quote refresh under 1s - FAIL",
+  "Refresh took 3.2s.",
+  "",
+  "### 3. Notes",
+  "Manual follow-up needed.",
+  "",
+  "VERIFY_RESULT: FAIL — 1 of 2 cases failed",
+].join("\n");
+
+test("parseVerifyFindings splits cases, statuses, evidence, preamble, and verdict summary", () => {
+  const parsed = parseVerifyFindings(STRUCTURED_FINDINGS);
+
+  assert.equal(parsed.cases.length, 3);
+  assert.deepEqual(parsed.cases[0], {
+    title: "1. Portfolio load shows live prices",
+    status: "pass",
+    evidence: ["AAPL matched GLOBAL_QUOTE."],
+  });
+  // Plain hyphen and unbolded status still parse.
+  assert.deepEqual(parsed.cases[1], {
+    title: "2. Quote refresh under 1s",
+    status: "fail",
+    evidence: ["Refresh took 3.2s."],
+  });
+  // Heading without a status suffix keeps its full title and a null status.
+  assert.deepEqual(parsed.cases[2], {
+    title: "3. Notes",
+    status: null,
+    evidence: ["Manual follow-up needed."],
+  });
+  assert.deepEqual(parsed.preamble, ["Verified against production."]);
+  assert.equal(parsed.verdictSummary, "1 of 2 cases failed");
+});
+
+test("parseVerifyFindings returns a null summary when the verdict line has no dash", () => {
+  const parsed = parseVerifyFindings("### 1. Case — **PASS**\nVERIFY_RESULT: PASS");
+  assert.equal(parsed.cases.length, 1);
+  assert.equal(parsed.verdictSummary, null);
+  // The VERIFY_RESULT line never leaks into evidence or preamble.
+  assert.deepEqual(parsed.cases[0].evidence, []);
+  assert.deepEqual(parsed.preamble, []);
+});
+
+test("parseVerifyFindings puts unparseable input in the preamble with zero cases", () => {
+  const parsed = parseVerifyFindings("the agent rambled\nwithout any headings");
+  assert.deepEqual(parsed.cases, []);
+  assert.equal(parsed.verdictSummary, null);
+  assert.deepEqual(parsed.preamble, ["the agent rambled", "without any headings"]);
+});
+
 // --- formatVerifyResultsSlack: per-case verify results posted to Slack ---
 
-test("formatVerifyResultsSlack posts every case result to Slack in mrkdwn", () => {
-  const findings = [
-    "### 1. Portfolio load shows live prices — **PASS**",
-    "AAPL matched GLOBAL_QUOTE.",
-    "",
-    "### 2. Quote refresh under 1s — **FAIL**",
-    "Refresh took 3.2s.",
-    "",
-    "VERIFY_RESULT: FAIL — 1 of 2 cases failed",
-  ].join("\n");
-  const msg = formatVerifyResultsSlack(issue([]), "verify", "fail", findings);
+interface TestBlock {
+  type: string;
+  text?: { type: string; text: string };
+  elements?: Array<{ type: string; text: string }>;
+}
 
-  assert.match(msg.text, /❌ ENG-9 — verify failed — test-plan results/);
-  assert.ok(msg.text.includes("1. Portfolio load shows live prices — *PASS*"));
-  assert.ok(msg.text.includes("AAPL matched GLOBAL_QUOTE."));
-  assert.ok(msg.text.includes("2. Quote refresh under 1s — *FAIL*"));
-  assert.ok(msg.text.includes("VERIFY_RESULT: FAIL"));
-  // Slack mrkdwn: markdown headings stripped, double-asterisk bold converted.
+function blocksOf(msg: { blocks?: unknown[] }): TestBlock[] {
+  return (msg.blocks ?? []) as TestBlock[];
+}
+
+test("formatVerifyResultsSlack renders one Block Kit section per parsed case", () => {
+  const iss = { ...issue([]), url: "https://linear.app/acme/issue/ENG-9" };
+  const msg = formatVerifyResultsSlack(iss, "verify", "fail", STRUCTURED_FINDINGS);
+  const blocks = blocksOf(msg);
+
+  assert.deepEqual(blocks[0], {
+    type: "header",
+    text: { type: "plain_text", text: "❌ ENG-9 · verify failed" },
+  });
+  assert.equal(
+    blocks[1].text?.text,
+    "*T*\n1/2 checks passed\n<https://linear.app/acme/issue/ENG-9|View on Linear>",
+  );
+  assert.equal(blocks[2].type, "divider");
+
+  const sections = blocks.filter((b) => b.type === "section").map((b) => b.text?.text ?? "");
+  assert.ok(sections.includes("✅ *1. Portfolio load shows live prices*\nAAPL matched GLOBAL_QUOTE."));
+  assert.ok(sections.includes("❌ *2. Quote refresh under 1s*\nRefresh took 3.2s."));
+  assert.ok(sections.includes("▫️ *3. Notes*\nManual follow-up needed."));
+
+  const contexts = blocks.filter((b) => b.type === "context").map((b) => b.elements?.[0]?.text);
+  assert.deepEqual(contexts, ["VERIFY_RESULT: FAIL — 1 of 2 cases failed", "conductor"]);
+
+  // Notification fallback text: headline, title, one line per case, verdict.
+  assert.match(msg.text, /^❌ ENG-9 · verify failed\nT\n/);
+  assert.ok(msg.text.includes("✅ 1. Portfolio load shows live prices"));
+  assert.ok(msg.text.includes("VERIFY_RESULT: FAIL — 1 of 2 cases failed"));
   assert.ok(!msg.text.includes("###"));
   assert.ok(!msg.text.includes("**"));
 });
 
 test("formatVerifyResultsSlack labels each verdict and the late-findings case", () => {
   const pass = formatVerifyResultsSlack(issue([]), "hotfix verify", "pass", FINDINGS);
-  assert.match(pass.text, /✅ ENG-9 — hotfix verify passed — test-plan results/);
+  assert.equal(blocksOf(pass)[0].text?.text, "✅ ENG-9 · hotfix verify passed");
+  assert.match(pass.text, /VERIFY_RESULT: PASS — all five cases passed/);
 
-  const late = formatVerifyResultsSlack(issue([]), "verify", null, "no verdict line here");
-  assert.match(late.text, /🔎 ENG-9 — verify findings/);
+  const late = formatVerifyResultsSlack(issue([]), "verify", null, "### 1. Case\nno verdict line here");
+  assert.equal(blocksOf(late)[0].text?.text, "🔎 ENG-9 · verify findings");
 });
 
-test("formatVerifyResultsSlack truncates oversized findings and points at Linear", () => {
-  const findings = Array.from({ length: 200 }, (_, i) => `### ${i + 1}. Case — **PASS** ${"x".repeat(40)}`).join("\n");
+test("formatVerifyResultsSlack caps rendered cases at 10 and evidence at 300 chars", () => {
+  const findings = Array.from(
+    { length: 12 },
+    (_, i) => `### ${i + 1}. Case — **PASS**\n${"x".repeat(400)}`,
+  ).join("\n");
   const msg = formatVerifyResultsSlack(issue([]), "verify", "pass", findings);
+  const sections = blocksOf(msg).filter((b) => b.type === "section");
+
+  // Summary section + 10 case sections + the overflow pointer.
+  assert.equal(sections.length, 12);
+  assert.equal(sections[11].text?.text, "… 2 more check(s) — full findings on the Linear ticket");
+  const caseText = sections[1].text?.text ?? "";
+  assert.ok(caseText.endsWith("…"));
+  assert.ok(caseText.length < 350);
+  assert.ok(msg.text.length < 3000);
+});
+
+test("formatVerifyResultsSlack falls back to the flat rendering for unstructured findings", () => {
+  const findings = Array.from({ length: 200 }, (_, i) => `case ${i + 1} looked fine ${"x".repeat(40)}`).join("\n");
+  const msg = formatVerifyResultsSlack(issue([]), "verify", "pass", findings);
+
+  assert.match(msg.text, /✅ ENG-9 — verify passed — test-plan results/);
   assert.ok(msg.text.length < 3200);
   assert.ok(msg.text.includes("truncated — full findings on the Linear ticket"));
+  // Flat path keeps the statusBlocks shape: bold headline section, no header block.
+  assert.equal(blocksOf(msg)[0].type, "section");
 });
