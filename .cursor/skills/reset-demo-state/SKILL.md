@@ -1,17 +1,18 @@
 ---
 name: reset-demo-state
 description: >-
-  Reset the conductor demo when the start mode is already known (feature or
-  hotfix). Prefer the rearm-demo skill when the user says rearm / reset the demo
-  without choosing a beat — that skill asks beginning vs hotfix. Use this skill
-  when the user already said start from the ticket, arm hotfix, or names a mode
-  explicitly. Distinct from compound's reset-demo skill (wipes a built feature).
+  Reset the conductor demo. If the user has not chosen a start beat, ask once —
+  from the beginning (feature: tickets in Backlog) or from the hotfix (FE-13 PR
+  armed, presenter merges) — then run the matching command. Use when the user
+  says rearm, reset the demo, clean slate, start from the ticket, or arm hotfix.
+  The compound repo carries a rearm-demo skill that delegates here. Distinct
+  from compound's reset-demo skill (wipes a built feature).
 ---
 
 # Reset demo state
 
-Re-arm when mode is already known. If the user has not chosen a beat, stop and
-use [rearm-demo](../rearm-demo/SKILL.md) instead (it asks).
+Re-arm the conductor demo. If the user has not chosen a beat, ask once:
+from the beginning (feature) or from the hotfix? Then run the matching command.
 
 ## Mode → command
 
@@ -60,4 +61,3 @@ curl -s "$TARGET_APP_URL/api/market/quotes?tickers=AAPL,MSFT" | jq '{resolved, d
 - Mutate `main`
 - Pause Datadog synthetics
 - Fabricate Linear markers (hotfix uses the real fleet)
-- Ask which mode — that is `rearm-demo`
