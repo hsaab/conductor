@@ -21,10 +21,10 @@ import type { LinearIssuePayload } from "../types.js";
 
 /** Mirrors the custom payload Datadog sends (scripts/setup-datadog.mjs). */
 const realDatadogPayload = {
-  title: "compound — quotes-check latency",
+  title: "compound — market quotes latency",
   body: "responseTime 4200ms > 1500ms",
   alert_type: "error",
-  route: "/api/market/quotes-check",
+  route: "/api/market/quotes",
   monitor_id: "12345",
 };
 
@@ -80,7 +80,7 @@ test("isDispatchableAlert accepts a firing alert_type even without a route", () 
 });
 
 test("isDispatchableAlert accepts a latency-route match even when alert_type is absent", () => {
-  const { alert, alertType } = extractAlert({ route: "/api/market/quotes-check", title: "latency" });
+  const { alert, alertType } = extractAlert({ route: "/api/market/quotes", title: "latency" });
   assert.equal(alertType, undefined);
   assert.equal(isDispatchableAlert(alert, alertType), true);
 });

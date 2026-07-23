@@ -27,17 +27,17 @@ Secrets live only in `.env` (gitignored). This doc references them as env vars.
 |---|---|
 | Conductor (orchestrator + dashboard) | `https://conductor-factory.vercel.app` |
 | Compound (target app) | `https://compound-kappa-one.vercel.app` |
-| Latency surface route | `GET /api/market/quotes-check` (20-ticker basket) |
+| Latency surface route | `GET /api/market/quotes?tickers=<20-ticker basket>` |
 | Trigger label / state | `cursor-fleet` / `In Progress` |
 | Target repo | `hsaab/compound` (`GH_OWNER=hsaab`, `DEPLOY_TARGET_REPO=compound`) |
 | Conductor repo | `hsaab/conductor` |
 | Cloud agent model | `composer-2.5` |
 | Datadog site | `us5.datadoghq.com` (PAT is US5-scoped; Bearer auth) |
-| Synthetic test | `crb-5yk-pwm` — "compound — quotes-check latency", `responseTime < 1500ms`, every 60s |
+| Synthetic test | `44p-j68-jai` — "compound — market quotes latency", `responseTime < 1500ms` + resolved≥10, every 60s |
 | Datadog webhook | `conductor_cursor_automation` → `/webhook/datadog?secret=$DATADOG_WEBHOOK_SECRET` |
 | Synthetic alert handle | `@webhook-conductor_cursor_automation` |
 | Act 1 ticket (feature) | **FE-7** — "Build AI advisor chat for portfolio guidance" |
-| Act 2 ticket (regression) | **FE-13** — "Portfolio prices look stale — make holding quotes real-time" |
+| Act 2 ticket (regression) | **FE-13** — "Portfolio prices look stale — make quotes real-time" (TTL bypass + paced per-symbol lookups) |
 
 ---
 
@@ -53,7 +53,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "$BRIDGE_URL/api/board"       # expect 
 
 ### 1.2 Compound is live and FAST (baseline, pre-regression)
 ```bash
-curl -s "https://compound-kappa-one.vercel.app/api/market/quotes-check" \
+curl -s "https://compound-kappa-one.vercel.app/api/market/quotes?tickers=AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,BRK.B,JPM,V,JNJ,WMT,PG,MA,HD,CVX,ABBV,KO,PEP,COST" \
   | jq '{resolved, durationMs, degraded}'
 ```
 Expect `resolved: 20`, `durationMs` well under `1500`, `degraded: false`. This is the
@@ -61,12 +61,19 @@ healthy baseline the synthetic passes against.
 
 ### 1.3 Datadog synthetic exists, is live, and asserts the right thing
 ```bash
-curl -s "https://api.us5.datadoghq.com/api/v1/synthetics/tests/crb-5yk-pwm" \
+curl -s "https://api.us5.datadoghq.com/api/v1/synthetics/tests/44p-j68-jai" \
   -H "Authorization: Bearer $DD_API_KEY" \
   | jq '{status, url: .config.request.url, assertions: .config.assertions, message}'
 ```
-Expect `status: "live"`, url ends `/api/market/quotes-check`, an assertion
-`responseTime lessThan 1500`, and `message` containing `@webhook-conductor_cursor_automation`.
+Expect `status: "live"`, url contains `/api/market/quotes?tickers=`, an assertion
+`responseTime lessThan 1500`, a body assertion on `$.resolved`, and `message`
+containing `@webhook-conductor_cursor_automation`.
+
+> Note: the webhook integration's custom `route` field may still say
+> `/api/market/quotes-check` if the Datadog PAT cannot write webhooks (API 404).
+> Dispatch still works — `isDispatchableAlert` matches `/api/market/` and
+> "latency" in the synthetic title. Prefer updating the webhook payload in the
+> Datadog UI to `route: "/api/market/quotes"` when you have write access.
 
 ### 1.4 Datadog webhook points at conductor with the correct secret
 ```bash
@@ -194,10 +201,11 @@ Act 1 ends with FE-7 shipped and verify passing (Slack posts the green verdict).
 ## 4. Act 2 — regression + self-remediation (FE-13, the money shot)
 
 **Narrative:** a plausible ticket ("prices look stale — make them real-time") ships a
-change that **drops the quote cache** (`src/lib/market-data/cached.ts`) / introduces an
-N+1, which passes review but is slow under production data. The Datadog synthetic
+change that **disables the quote TTL** and adds **paced per-symbol GLOBAL_QUOTE**
+lookups (≥250ms apart, unconditional). The Datadog synthetic on `/api/market/quotes`
 catches the latency, fires the webhook, and conductor dispatches a remediation agent
-that opens a hotfix PR restoring batching/caching — re-entering the loop at review.
+that opens a hotfix PR restoring a sane TTL (~30s) **and** the concurrent fan-out
+(both required — the 60s synthetic tick always outlives a 30s TTL).
 
 ### Beat B1 — Ship the regression
 - **Action:** move **FE-13** to **In Progress**; let it build, then merge its PR to
@@ -207,16 +215,16 @@ that opens a hotfix PR restoring batching/caching — re-entering the loop at re
   latency; the Datadog synthetic is the latency detector.
 - **Verify regression is real (do this in rehearsal):**
   ```bash
-  curl -s "https://compound-kappa-one.vercel.app/api/market/quotes-check" | jq '.durationMs'
+  curl -s "https://compound-kappa-one.vercel.app/api/market/quotes?tickers=AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,BRK.B,JPM,V,JNJ,WMT,PG,MA,HD,CVX,ABBV,KO,PEP,COST" | jq '.durationMs'
   ```
   Must be **> 1500** reliably. If it isn't, the regression didn't bite — see section 8.
 
 ### Beat B2 — Datadog detects latency
-- **Expected (≤2 min):** synthetic `crb-5yk-pwm` run fails the `responseTime < 1500ms`
+- **Expected (≤2 min):** synthetic `44p-j68-jai` run fails the `responseTime < 1500ms`
   assertion; its monitor alerts and notifies `@webhook-conductor_cursor_automation`.
 - **Verify:**
   ```bash
-  curl -s -G "https://api.us5.datadoghq.com/api/v1/synthetics/tests/crb-5yk-pwm/results" \
+  curl -s -G "https://api.us5.datadoghq.com/api/v1/synthetics/tests/44p-j68-jai/results" \
     -H "Authorization: Bearer $DD_API_KEY" | jq '.results[0] | {passed: .result.passed, responseTime: .result.timings.total}'
   ```
   Expect a recent `passed: false`.
@@ -244,7 +252,7 @@ that opens a hotfix PR restoring batching/caching — re-entering the loop at re
   `remediate: running`.
 - **Close:** merge the hotfix. The next production deploy stamps `hotfix-merged` +
   `hotfix-deployed`, a fresh verify agent re-runs the test plan, and
-  `hotfix-verify-pass` finally flips `remediate: done`. Confirm `quotes-check`
+  `hotfix-verify-pass` finally flips `remediate: done`. Confirm `market quotes`
   `durationMs` drops back under 1500 and the synthetic recovers. Recovery
   notifications are ignored by conductor (no re-trigger).
 
@@ -278,7 +286,7 @@ curl -s -X POST "$BRIDGE_URL/webhook/vercel?secret=$VERCEL_WEBHOOK_SECRET" \
 ```bash
 curl -s -X POST "$BRIDGE_URL/webhook/datadog?secret=$DATADOG_WEBHOOK_SECRET" \
   -H 'Content-Type: application/json' \
-  -d '{"title":"compound — quotes-check latency","body":"responseTime 4200ms > 1500ms","alert_type":"error","route":"/api/market/quotes-check","monitor_id":"manual"}' | jq
+  -d '{"title":"compound — market quotes latency","body":"responseTime 4200ms > 1500ms","alert_type":"error","route":"/api/market/quotes","monitor_id":"manual"}' | jq
 ```
 This dispatches a real remediation agent against the most recent deployed-but-not-yet-
 remediated fleet. Only use after FE-13 has deployed.
@@ -302,6 +310,13 @@ provide real, recent artifacts. Keep the reconcile loop (5.1) running throughout
 ---
 
 ## 7. Reset / re-arm between rehearsals
+
+Two start modes via `DEMO_START_MODE`:
+
+- `feature` (default): tickets to Backlog, board empty, baseline must be fast.
+- `hotfix`: after reset, triggers a real FE-13 fleet, waits for its PR (does **not**
+  merge), fingerprints the PR head, and leaves FE-13 mid-pipeline for the presenter
+  to merge live as the opening beat.
 
 Re-arming via `/api/reset` wipes **all** comments + the 🚀 reaction so a fresh
 drag relaunches a fleet. (Dragging a ticket out of "In Progress" only clears
@@ -331,21 +346,19 @@ rehearsal PRs so `main` is back to the fast baseline before the real run.
   one `cursor-fleet` ticket through deploy/verify/remediate at a time.** Let FE-7
   fully ship (or reach `verify: done`) before moving FE-13 to In Progress; during
   Act 2, no other fleet should be in the deploy/remediate stages.
-- **Regression must exceed 1500ms — now guaranteed by the ticket, not luck.** FE-13's
-  acceptance criteria deterministically force the slow path: resolve each holding with
-  an independent per-symbol `GLOBAL_QUOTE` (no batching/bulk endpoint) and pace the
-  sequential calls **≥250ms apart**. With the 20-ticker `quotes-check` basket that is
-  19 gaps × 250ms ≈ **4,750ms** of pure pacing delay before any network time —
-  roughly 3× the 1500ms threshold, independent of the AlphaVantage key tier or network
-  speed. (The old risk was that merely dropping the TTL while keeping batching could
-  still resolve under 1500ms on a premium key; the pacing requirement removes that.)
-  The 4.75s figure is deliberately kept under Vercel's function timeout so the route
-  returns a clean slow `200` with timing rather than erroring. Still confirm Beat B1's
-  `durationMs > 1500` in rehearsal, and note the guarantee depends on the build agent
-  obeying the criteria — the pre-warmed `cursor/fe-13-realtime-quotes-regression` PR
-  (section 6) and the §5.4 alert replay remain the backstops. If you ever need to widen
-  margin further, raise the pacing in the ticket or lower the synthetic threshold via
-  `RESPONSE_TIME_MS` and re-run `scripts/setup-datadog.mjs` (idempotent).
+- **Regression must exceed 1500ms — guaranteed by the ticket, not luck.** FE-13's
+  acceptance criteria force the slow path on `/api/market/quotes` only (SSR
+  snapshot path in `portfolio.ts` is out of scope):
+  1. **Unconditional** quote-cache bypass (not market-open scoped — weekends /
+     status errors would otherwise leave the 15-minute closed TTL intact).
+  2. Per-symbol `GLOBAL_QUOTE` lookups paced **≥250ms apart**, including on
+     per-symbol failures/throttles (so snapshot fallback cannot collapse latency).
+  With the 20-ticker basket that is 19 gaps × 250ms ≈ **4,750ms** floor before
+  network time (~6–15s realistic). The hotfix must restore a sane TTL (~30s)
+  **and** concurrent fan-out — a TTL-only fix never clears the alert because the
+  60s synthetic tick always outlives a 30s TTL. Confirm Beat B1 `durationMs >
+  1500` in rehearsal (including once outside US market hours). Pre-warmed PRs
+  and the §5.4 alert replay remain backstops.
 - **Cloud agent latency.** Pre-warm (section 6). Never block the narrative on a live
   multi-minute run.
 - **Webhook misses.** Every webhook has a manual replay (sections 5.2–5.4).
@@ -357,7 +370,7 @@ rehearsal PRs so `main` is back to the fast baseline before the real run.
   run every 60s. Pause the synthetic after the demo if you don't want it polling.
 ```bash
 # pause the synthetic when done
-curl -s -X PATCH "https://api.us5.datadoghq.com/api/v1/synthetics/tests/crb-5yk-pwm/status" \
+curl -s -X PATCH "https://api.us5.datadoghq.com/api/v1/synthetics/tests/44p-j68-jai/status" \
   -H "Authorization: Bearer $DD_API_KEY" -H 'Content-Type: application/json' \
   -d '{"new_status":"paused"}' | jq -c
 ```

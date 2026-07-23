@@ -31,14 +31,19 @@ const FIRING_ALERT_TYPES = new Set(["error", "warning", "alert"]);
  * into a default-titled "alert" and dispatch a (paid) remediation agent.
  *
  * Recognized when EITHER a known firing `alert_type` is present, OR the title/route
- * matches the latency surface (the quotes-check route). The real Datadog custom
+ * matches the latency surface (`/api/market/quotes`). The real Datadog custom
  * payload satisfies both (it carries `alert_type:"error"` and the hardcoded route).
  */
 export function isDispatchableAlert(alert: RemediationAlert, alertType: string | undefined): boolean {
   const type = (alertType ?? "").toLowerCase().trim();
   if (FIRING_ALERT_TYPES.has(type)) return true;
   const haystack = `${alert.route ?? ""} ${alert.title ?? ""}`.toLowerCase();
-  return haystack.includes("quotes-check") || haystack.includes("/api/market/") || haystack.includes("latency");
+  return (
+    haystack.includes("market quotes") ||
+    haystack.includes("/api/market/quotes") ||
+    haystack.includes("/api/market/") ||
+    haystack.includes("latency")
+  );
 }
 
 /** Tolerantly extracts the fields conductor needs from a templated Datadog webhook body. */
