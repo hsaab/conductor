@@ -210,12 +210,14 @@ test("parseVerifyFindings splits cases, statuses, evidence, preamble, and verdic
     evidence: ["Manual follow-up needed."],
   });
   assert.deepEqual(parsed.preamble, ["Verified against production."]);
+  assert.equal(parsed.verdictStatus, "fail");
   assert.equal(parsed.verdictSummary, "1 of 2 cases failed");
 });
 
 test("parseVerifyFindings returns a null summary when the verdict line has no dash", () => {
   const parsed = parseVerifyFindings("### 1. Case — **PASS**\nVERIFY_RESULT: PASS");
   assert.equal(parsed.cases.length, 1);
+  assert.equal(parsed.verdictStatus, "pass");
   assert.equal(parsed.verdictSummary, null);
   // The VERIFY_RESULT line never leaks into evidence or preamble.
   assert.deepEqual(parsed.cases[0].evidence, []);
@@ -225,6 +227,7 @@ test("parseVerifyFindings returns a null summary when the verdict line has no da
 test("parseVerifyFindings puts unparseable input in the preamble with zero cases", () => {
   const parsed = parseVerifyFindings("the agent rambled\nwithout any headings");
   assert.deepEqual(parsed.cases, []);
+  assert.equal(parsed.verdictStatus, null);
   assert.equal(parsed.verdictSummary, null);
   assert.deepEqual(parsed.preamble, ["the agent rambled", "without any headings"]);
 });
@@ -285,6 +288,13 @@ test("formatVerifyResultsSlack labels each verdict and the late-findings case", 
   assert.equal(blocksOf(late)[0].text?.text, "🔎 ENG-9 · verify findings");
 });
 
+test("formatVerifyResultsSlack keeps a bare VERIFY_RESULT line with no dash-summary", () => {
+  const msg = formatVerifyResultsSlack(issue([]), "verify", "pass", "### 1. Case — **PASS**\nVERIFY_RESULT: PASS");
+  const contexts = blocksOf(msg).filter((b) => b.type === "context").map((b) => b.elements?.[0]?.text);
+  assert.deepEqual(contexts, ["VERIFY_RESULT: PASS", "conductor"]);
+  assert.ok(msg.text.includes("VERIFY_RESULT: PASS"));
+});
+
 test("formatVerifyResultsSlack caps rendered cases at 10 and evidence at 300 chars", () => {
   const findings = Array.from(
     { length: 12 },
@@ -325,6 +335,19 @@ test("capText truncation never severs an emoji surrogate pair", () => {
   assert.ok(caseSection);
   // No lone surrogate (U+FFFD replacement or unpaired half) leaked into the text.
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(caseSection.text?.text ?? ""));
+});
+
+test("fallback notification text truncation never severs an emoji surrogate pair", () => {
+  // Oversized case titles land uncapped in the notification fallback `text`;
+  // truncating by code points must not emit a lone UTF-16 surrogate.
+  const findings = Array.from(
+    { length: 10 },
+    (_, i) => `### ${i + 1}. ${"🚀".repeat(200)} — **PASS**`,
+  ).join("\n");
+  const msg = formatVerifyResultsSlack(issue([]), "verify", "pass", findings);
+
+  assert.ok([...msg.text].length <= 3001);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(msg.text));
 });
 
 test("formatVerifyResultsSlack falls back to the flat rendering for unstructured findings", () => {
