@@ -302,6 +302,31 @@ test("formatVerifyResultsSlack caps rendered cases at 10 and evidence at 300 cha
   assert.ok(msg.text.length < 3000);
 });
 
+test("formatVerifyResultsSlack caps a pathologically long case title so the section stays under Slack's limit", () => {
+  const longTitle = "x".repeat(5000);
+  const msg = formatVerifyResultsSlack(issue([]), "verify", "pass", `### 1. ${longTitle} — **PASS**\nevidence`);
+  const caseSection = blocksOf(msg)
+    .filter((b) => b.type === "section")
+    .find((b) => b.text?.text.startsWith("✅"));
+
+  assert.ok(caseSection);
+  assert.ok((caseSection.text?.text.length ?? 0) < 3000);
+  assert.ok(caseSection.text?.text.includes("…"));
+});
+
+test("capText truncation never severs an emoji surrogate pair", () => {
+  // 400 rocket emojis (each a UTF-16 surrogate pair) as evidence: the 300-char
+  // cap must land on a whole emoji, never half of one.
+  const msg = formatVerifyResultsSlack(issue([]), "verify", "pass", `### 1. Case — **PASS**\n${"🚀".repeat(400)}`);
+  const caseSection = blocksOf(msg)
+    .filter((b) => b.type === "section")
+    .find((b) => b.text?.text.startsWith("✅"));
+
+  assert.ok(caseSection);
+  // No lone surrogate (U+FFFD replacement or unpaired half) leaked into the text.
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(caseSection.text?.text ?? ""));
+});
+
 test("formatVerifyResultsSlack falls back to the flat rendering for unstructured findings", () => {
   const findings = Array.from({ length: 200 }, (_, i) => `case ${i + 1} looked fine ${"x".repeat(40)}`).join("\n");
   const msg = formatVerifyResultsSlack(issue([]), "verify", "pass", findings);

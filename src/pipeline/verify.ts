@@ -122,6 +122,8 @@ export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
 
 const MAX_RENDERED_CASES = 10;
 const MRKDWN_SNIPPET_CHAR_CAP = 300;
+/** Case/issue titles are LLM- or user-authored; cap them so one section stays under Slack's 3000-char limit. */
+const TITLE_CHAR_CAP = 200;
 /** Keep the notification/screen-reader fallback text under Slack's ~3000-char comfort zone. */
 const SLACK_TEXT_CHAR_CAP = 3000;
 
@@ -129,10 +131,16 @@ function caseEmoji(status: VerifyCaseResult["status"]): string {
   return status === "pass" ? "✅" : status === "fail" ? "❌" : "▫️";
 }
 
+/** Truncates to `cap` code points with a trailing ellipsis. Splits on code points so it never severs an emoji surrogate pair. */
+function capText(text: string, cap: number): string {
+  const chars = [...text];
+  return chars.length > cap ? `${chars.slice(0, cap).join("")}…` : text;
+}
+
 /** Joins parsed lines (evidence or preamble) into a capped mrkdwn snippet. */
 function mrkdwnSnippet(lines: string[]): string {
   const text = lines.map((line) => line.replace(/\*\*/g, "*")).join("\n");
-  return text.length > MRKDWN_SNIPPET_CHAR_CAP ? `${text.slice(0, MRKDWN_SNIPPET_CHAR_CAP)}…` : text;
+  return capText(text, MRKDWN_SNIPPET_CHAR_CAP);
 }
 
 function mrkdwnSection(text: string): { type: "section"; text: { type: "mrkdwn"; text: string } } {
@@ -194,7 +202,7 @@ export function formatVerifyResultsSlack(
   const passCount = casesWithStatus.filter((c) => c.status === "pass").length;
 
   const preamble = mrkdwnSnippet(parsed.preamble);
-  const summaryLines = [`*${issue.title}*`];
+  const summaryLines = [`*${capText(issue.title, TITLE_CHAR_CAP)}*`];
   if (preamble) summaryLines.push(preamble);
   if (casesWithStatus.length > 0) {
     summaryLines.push(`${passCount}/${casesWithStatus.length} checks passed`);
@@ -206,7 +214,7 @@ export function formatVerifyResultsSlack(
 
   const caseSections = renderedCases.map((c) => {
     const evidence = mrkdwnSnippet(c.evidence);
-    return mrkdwnSection(`${caseEmoji(c.status)} *${c.title}*${evidence ? `\n${evidence}` : ""}`);
+    return mrkdwnSection(`${caseEmoji(c.status)} *${capText(c.title, TITLE_CHAR_CAP)}*${evidence ? `\n${evidence}` : ""}`);
   });
   if (remaining > 0) {
     caseSections.push(mrkdwnSection(`… ${remaining} more check(s) — full findings on the Linear ticket`));
