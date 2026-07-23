@@ -69,6 +69,8 @@ export interface VerifyCaseResult {
 /** Typed view of the verify agent's findings, parsed once at the LLM boundary. */
 export interface ParsedVerifyFindings {
   cases: VerifyCaseResult[];
+  /** PASS/FAIL from the `VERIFY_RESULT` line, or null when the line is absent. */
+  verdictStatus: "pass" | "fail" | null;
   /** Text after the `VERIFY_RESULT: PASS/FAIL` dash, e.g. "all five cases passed". */
   verdictSummary: string | null;
   /** Trimmed non-empty lines before the first case heading, VERIFY_RESULT line excluded. */
@@ -81,7 +83,7 @@ const CASE_HEADING = /^#{1,6}\s+(\d+[.)].*)$/;
 const HEADING_PREFIX = /^#{1,6}\s+/;
 // The dash may be an em dash, en dash, or hyphen; the LLM sometimes drops the bold.
 const CASE_STATUS_SUFFIX = /\s*[—–-]\s*\*{0,2}(PASS|FAIL)\*{0,2}\s*$/i;
-const VERDICT_LINE = /^VERIFY_RESULT:\s*(?:PASS|FAIL)\b\s*(?:[—–-]\s*(.*))?$/i;
+const VERDICT_LINE = /^VERIFY_RESULT:\s*(PASS|FAIL)\b\s*(?:[—–-]\s*(.*))?$/i;
 
 /**
  * Parses the verify agent's findings markdown into per-case results. Findings
@@ -91,6 +93,7 @@ const VERDICT_LINE = /^VERIFY_RESULT:\s*(?:PASS|FAIL)\b\s*(?:[—–-]\s*(.*))?$
 export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
   const cases: VerifyCaseResult[] = [];
   const preamble: string[] = [];
+  let verdictStatus: ParsedVerifyFindings["verdictStatus"] = null;
   let verdictSummary: string | null = null;
 
   for (const raw of findings.split("\n")) {
@@ -99,7 +102,8 @@ export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
 
     const verdict = line.match(VERDICT_LINE);
     if (verdict) {
-      verdictSummary = verdict[1]?.trim() || null;
+      verdictStatus = verdict[1].toUpperCase() === "FAIL" ? "fail" : "pass";
+      verdictSummary = verdict[2]?.trim() || null;
       continue;
     }
 
@@ -117,7 +121,7 @@ export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
     (cases.length > 0 ? cases[cases.length - 1].evidence : preamble).push(line.replace(HEADING_PREFIX, ""));
   }
 
-  return { cases, verdictSummary, preamble };
+  return { cases, verdictStatus, verdictSummary, preamble };
 }
 
 const MAX_RENDERED_CASES = 10;
@@ -220,20 +224,22 @@ export function formatVerifyResultsSlack(
     caseSections.push(mrkdwnSection(`… ${remaining} more check(s) — full findings on the Linear ticket`));
   }
 
-  // The summary only appears when the findings carried a VERIFY_RESULT line,
-  // so re-parsing the verdict from them is safe when the arg is null (late report).
-  const verdictLine = parsed.verdictSummary
-    ? `VERIFY_RESULT: ${(verdict ?? parseVerifyVerdict(findings)) === "fail" ? "FAIL" : "PASS"} — ${parsed.verdictSummary}`
+  // Keep a bare `VERIFY_RESULT: PASS/FAIL` (no dash-summary) in the digest;
+  // only omit the context line when the agent never emitted VERIFY_RESULT.
+  const verdictLine = parsed.verdictStatus
+    ? parsed.verdictSummary
+      ? `VERIFY_RESULT: ${parsed.verdictStatus === "fail" ? "FAIL" : "PASS"} — ${parsed.verdictSummary}`
+      : `VERIFY_RESULT: ${parsed.verdictStatus === "fail" ? "FAIL" : "PASS"}`
     : null;
 
   const textLines = [headline, issue.title];
   if (preamble) textLines.push(preamble);
   textLines.push(...renderedCases.map((c) => `${caseEmoji(c.status)} ${c.title}`));
   if (verdictLine) textLines.push(verdictLine);
-  const text = textLines.join("\n");
 
   return {
-    text: text.length > SLACK_TEXT_CHAR_CAP ? `${text.slice(0, SLACK_TEXT_CHAR_CAP - 1)}…` : text,
+    // Code-point truncate so a trailing emoji never leaves a lone UTF-16 surrogate.
+    text: capText(textLines.join("\n"), SLACK_TEXT_CHAR_CAP),
     blocks: [
       { type: "header", text: { type: "plain_text", text: headline } },
       mrkdwnSection(summaryLines.join("\n")),
