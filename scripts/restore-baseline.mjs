@@ -1,35 +1,10 @@
 #!/usr/bin/env node
 /**
- * Restore the target app (compound) back to its fast `quotes-check` baseline so
- * the next FE-13 run can re-introduce the regression cleanly.
+ * Restore the target app (compound) back to its fast `/api/market/quotes`
+ * baseline so the next FE-13 run can re-introduce the regression cleanly.
  *
- * This is the explicit, opt-in counterpart to `reset-demo.mjs`: that script only
- * *detects and blocks* on a regressed `main`; this one *fixes* it. They are kept
- * separate so a plain `pnpm reset-demo` never mutates `main` by surprise.
- *
- * How it restores (deterministic, no history rewrite):
- *  - First fingerprints `main` for the FE-13 regression *behavior*. If the
- *    regression is not present, it is a NO-OP — so it never clobbers unrelated
- *    work when there is nothing to fix.
- *  - When regressed, builds a single commit on a fresh branch whose tree, for the
- *    EXACT surface files only, matches the baseline tag (`demo-baseline`): files
- *    added by the regression (e.g. `src/lib/market-data/constants.ts`) are
- *    deleted, modified files reverted. It uses an exact file list — never a
- *    directory sweep — so a later feature's new file under the same folders is
- *    left untouched.
- *  - Opens a PR and squash-merges it (auditable), then deletes the branch.
- *
- * It never force-pushes and never touches files outside the exact surface.
- *
- * Usage (env; load .env or rely on injected secrets):
- *   GH_TOKEN=...                 GitHub token with repo write on the target (required)
- *   GH_OWNER=hsaab               Target repo owner (default shown)
- *   DEPLOY_TARGET_REPO=compound  Target repo short name (default shown)
- *   BASELINE_TAG=demo-baseline   Git tag/ref holding the fast baseline (default shown)
- *   RESTORE_PATHS=...            Comma-separated EXACT files to restore (default:
- *                                the FE-13 regression surface)
- *   TARGET_APP_URL=...           Optional; when set, polls quotes-check after merge
- *   RESPONSE_TIME_MS=1500        Latency the restored baseline must drop under
+ * Opt-in counterpart to `reset-demo.mjs`: that script gates; this one fixes.
+ * Never force-pushes. Reverts only REGRESSION_SURFACE_FILES from demo-baseline.
  *
  *   pnpm restore-baseline
  */
@@ -40,6 +15,7 @@ import {
   treeFor,
   diffRestoreSurface,
   detectRegression,
+  quotesProbeUrl,
 } from "./github-baseline.mjs";
 
 const {
@@ -71,7 +47,6 @@ const surfaceFiles = RESTORE_PATHS
 
 const gh = makeGithub({ token, owner, repo });
 
-/** Bounded, informational poll of the live baseline latency after the merge. */
 async function pollBaseline() {
   if (!TARGET_APP_URL) {
     console.log(
@@ -79,7 +54,7 @@ async function pollBaseline() {
     );
     return;
   }
-  const url = `${TARGET_APP_URL.replace(/\/$/, "")}/api/market/quotes-check`;
+  const url = quotesProbeUrl(TARGET_APP_URL);
   console.log(`\nWaiting for the redeploy to serve the fast baseline (${url})...`);
   for (let attempt = 1; attempt <= 10; attempt++) {
     await new Promise((r) => setTimeout(r, 15_000));
@@ -88,7 +63,9 @@ async function pollBaseline() {
       const json = await res.json().catch(() => ({}));
       const ms = json.durationMs;
       if (typeof ms === "number" && ms < threshold) {
-        console.log(`ok Baseline healthy: durationMs=${ms} < ${threshold} (attempt ${attempt}).`);
+        console.log(
+          `ok Baseline healthy: durationMs=${ms} < ${threshold} (attempt ${attempt}).`,
+        );
         return;
       }
       console.log(`- attempt ${attempt}: durationMs=${ms ?? "?"} (waiting for redeploy)`);
@@ -96,24 +73,29 @@ async function pollBaseline() {
       console.log(`- attempt ${attempt}: ${err.message}`);
     }
   }
-  console.warn("! Redeploy not observed under threshold yet — check Vercel, then re-run `pnpm reset-demo` to confirm.");
+  console.warn(
+    "! Redeploy not observed under threshold yet — check Vercel, then re-run `pnpm reset-demo` to confirm.",
+  );
 }
 
 async function main() {
   console.log(`Restoring ${owner}/${repo} main to the "${baselineRef}" baseline...\n`);
 
-  // Precondition: only act when `main` actually carries the FE-13 regression, so
-  // this never reverts unrelated changes to the surface files when there's nothing to fix.
   const regression = await detectRegression(gh, "main", { surfaceFiles });
   if (!regression.regressed) {
     console.log("ok main shows no FE-13 regression markers — nothing to restore.");
     process.exit(0);
   }
-  console.log(`Detected the FE-13 regression on main (${regression.reasons.length} signal(s)):`);
+  console.log(
+    `Detected the FE-13 regression on main (${regression.reasons.length} signal(s)):`,
+  );
   for (const reason of regression.reasons.slice(0, 6)) console.log(`  - ${reason}`);
   console.log("");
 
-  const [baseline, main] = await Promise.all([treeFor(gh, baselineRef), treeFor(gh, "main")]);
+  const [baseline, main] = await Promise.all([
+    treeFor(gh, baselineRef),
+    treeFor(gh, "main"),
+  ]);
   const changes = diffRestoreSurface(baseline, main, surfaceFiles);
 
   if (changes.length === 0) {
@@ -132,7 +114,7 @@ async function main() {
   const commit = await gh("/git/commits", {
     method: "POST",
     body: {
-      message: `hotfix: restore fast quotes-check baseline from ${baselineRef}\n\nReverts the FE-13 regression surface to the known-fast baseline so the\nDatadog synthetic recovers and the next FE-13 run re-adds the regression.`,
+      message: `hotfix: restore fast market quotes baseline from ${baselineRef}\n\nReverts the FE-13 TTL/paced-quotes regression surface to the known-fast\nbaseline so the Datadog synthetic recovers and the next FE-13 run re-adds it.`,
       tree: newTree.sha,
       parents: [main.commitSha],
     },
@@ -145,11 +127,11 @@ async function main() {
   const pr = await gh("/pulls", {
     method: "POST",
     body: {
-      title: "Hotfix: restore fast quotes-check baseline (re-arm demo)",
+      title: "Hotfix: restore fast market quotes baseline (re-arm demo)",
       head: branch,
       base: "main",
       body:
-        `Restores the regression surface to \`${baselineRef}\` so \`/api/market/quotes-check\` ` +
+        `Restores the regression surface to \`${baselineRef}\` so \`/api/market/quotes\` ` +
         `drops back under ${threshold}ms and the Datadog synthetic recovers.\n\n` +
         `Opened by \`conductor restore-baseline\` to re-arm the demo; the next FE-13 run re-introduces the regression.`,
     },
@@ -167,7 +149,9 @@ async function main() {
   );
 
   await pollBaseline();
-  console.log("\nDone. Baseline restored — re-run `pnpm reset-demo` to confirm a clean, armed start.");
+  console.log(
+    "\nDone. Baseline restored — re-run `pnpm reset-demo` to confirm a clean, armed start.",
+  );
 }
 
 main().catch((err) => {
