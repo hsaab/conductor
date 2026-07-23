@@ -80,10 +80,10 @@ export const datadogSite = (): string => envOr(process.env.DD_SITE, "datadoghq.c
 
 /**
  * How long the observe stage keeps monitoring for production alerts before
- * closing cleanly (no remediation). Defaults to 2 min to align with Datadog
- * synthetic cadence. Override with `OBSERVE_WINDOW_MS`.
+ * closing cleanly (no remediation). Defaults to 15 min to exceed Datadog's
+ * 10 min re-notify interval. Override with `OBSERVE_WINDOW_MS`.
  */
-export const observeWindowMs = (): number => Number(process.env.OBSERVE_WINDOW_MS ?? 120_000);
+export const observeWindowMs = (): number => Number(process.env.OBSERVE_WINDOW_MS ?? 900_000);
 
 /** Cloud model used for every spawned agent. Override with `BRIDGE_MODEL_ID`. */
 export const modelId = envOr(process.env.BRIDGE_MODEL_ID, "composer-2.5");

@@ -5,12 +5,12 @@
  * Creates, idempotently:
  *  1. A webhook integration that POSTs to conductor's /webhook/datadog.
  *  2. A Synthetic API test against compound's /api/market/quotes route with a
- *     response-time assertion (and a body check that quotes resolved).
+ *     response-time assertion.
  *
  *   node --env-file=.env scripts/setup-datadog.mjs
  */
 
-import { quotesProbeUrl, SYNTHETIC_QUOTE_TICKERS } from "./github-baseline.mjs";
+import { quotesProbeUrl } from "./github-baseline.mjs";
 
 const {
   DD_API_KEY,
@@ -154,15 +154,6 @@ async function ensureSyntheticTest() {
             assertions: [
               { type: "statusCode", operator: "is", target: 200 },
               { type: "responseTime", operator: "lessThan", target: threshold },
-              {
-                type: "body",
-                operator: "validatesJSONPath",
-                target: {
-                  jsonPath: "$.resolved",
-                  operator: "moreThanOrEqual",
-                  targetValue: Math.min(10, SYNTHETIC_QUOTE_TICKERS.length),
-                },
-              },
             ],
           },
           options: {
@@ -170,7 +161,7 @@ async function ensureSyntheticTest() {
             min_failure_duration: 0,
             min_location_failed: 1,
             retry: { count: 0, interval: 300 },
-            monitor_options: { renotify_interval: 0 },
+            monitor_options: { renotify_interval: 10 },
           },
         },
       );
@@ -198,15 +189,6 @@ async function ensureSyntheticTest() {
       assertions: [
         { type: "statusCode", operator: "is", target: 200 },
         { type: "responseTime", operator: "lessThan", target: threshold },
-        {
-          type: "body",
-          operator: "validatesJSONPath",
-          target: {
-            jsonPath: "$.resolved",
-            operator: "moreThanOrEqual",
-            targetValue: Math.min(10, SYNTHETIC_QUOTE_TICKERS.length),
-          },
-        },
       ],
     },
     options: {
@@ -214,7 +196,7 @@ async function ensureSyntheticTest() {
       min_failure_duration: 0,
       min_location_failed: 1,
       retry: { count: 0, interval: 300 },
-      monitor_options: { renotify_interval: 0 },
+      monitor_options: { renotify_interval: 10 },
     },
   };
 

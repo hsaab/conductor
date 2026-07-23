@@ -33,7 +33,7 @@ Secrets live only in `.env` (gitignored). This doc references them as env vars.
 | Conductor repo | `hsaab/conductor` |
 | Cloud agent model | `composer-2.5` |
 | Datadog site | `us5.datadoghq.com` (PAT is US5-scoped; Bearer auth) |
-| Synthetic test | `44p-j68-jai` — "compound — market quotes latency", `responseTime < 1500ms` + resolved≥10, every 60s |
+| Synthetic test | `44p-j68-jai` — "compound — market quotes latency", `responseTime < 1500ms`, every 60s |
 | Datadog webhook | `conductor_cursor_automation` → `/webhook/datadog?secret=$DATADOG_WEBHOOK_SECRET` |
 | Synthetic alert handle | `@webhook-conductor_cursor_automation` |
 | Act 1 ticket (feature) | **FE-7** — "Build AI advisor chat for portfolio guidance" |
@@ -66,8 +66,8 @@ curl -s "https://api.us5.datadoghq.com/api/v1/synthetics/tests/44p-j68-jai" \
   | jq '{status, url: .config.request.url, assertions: .config.assertions, message}'
 ```
 Expect `status: "live"`, url contains `/api/market/quotes?tickers=`, an assertion
-`responseTime lessThan 1500`, a body assertion on `$.resolved`, and `message`
-containing `@webhook-conductor_cursor_automation`.
+`responseTime lessThan 1500`, and `message` containing
+`@webhook-conductor_cursor_automation`.
 
 > Note: the webhook integration's custom `route` field may still say
 > `/api/market/quotes-check` if the Datadog PAT cannot write webhooks (API 404).
