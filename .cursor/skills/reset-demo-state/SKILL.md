@@ -1,38 +1,26 @@
 ---
 name: reset-demo-state
 description: >-
-  Reset the conductor closed-loop demo across Linear tickets, the board, and the
-  compound /api/market/quotes baseline. Choose start mode from user intent —
-  feature (default, full Act 1→2 from tickets) or hotfix (arm FE-13 PR, presenter
-  merges). Use when the user says reset the demo, re-arm the demo, clean slate,
-  start from the ticket, arm hotfix start, start at the hotfix, or reset for the
-  remediation beat. Distinct from compound's reset-demo skill (wipes a built feature).
+  Reset the conductor demo when the start mode is already known (feature or
+  hotfix). Prefer the rearm-demo skill when the user says rearm / reset the demo
+  without choosing a beat — that skill asks beginning vs hotfix. Use this skill
+  when the user already said start from the ticket, arm hotfix, or names a mode
+  explicitly. Distinct from compound's reset-demo skill (wipes a built feature).
 ---
 
 # Reset demo state
 
-Re-arm the conductor demo. Mode comes from the user's words, not an env var.
+Re-arm when mode is already known. If the user has not chosen a beat, stop and
+use [rearm-demo](../rearm-demo/SKILL.md) instead (it asks).
 
-## Pick the mode first
+## Mode → command
 
-| User says | Mode | Command |
-|---|---|---|
-| reset the demo, re-arm, clean slate, start from the ticket / Act 1 | **feature** | `pnpm reset-demo` |
-| arm hotfix, start at the hotfix, start at remediation, hotfix beat | **hotfix** | `pnpm reset-demo:hotfix` |
+| Mode | Command |
+|---|---|
+| feature (tickets → Backlog, empty board) | `pnpm reset-demo` |
+| hotfix (arm FE-13 PR, do not merge) | `pnpm reset-demo:hotfix` |
 
-If unclear, ask once: feature (tickets in Backlog) or hotfix (FE-13 PR ready to merge)?
-
-Print the choice before running:
-
-```
-Arming: feature
-```
-
-or
-
-```
-Arming: hotfix
-```
+Print `Arming: feature` or `Arming: hotfix` before running.
 
 ## Surfaces
 
@@ -58,11 +46,7 @@ pnpm reset-demo           # feature
 pnpm reset-demo:hotfix    # hotfix
 ```
 
-**feature.** Clear tickets, close stray FE-13/regression PRs, pass baseline gate, empty board.
-
-**hotfix.** After a clean gate: `POST /api/trigger` for FE-13, reconcile until a PR exists, fingerprint the PR head (refuse if no regression), stop before merge. Presenter merges live.
-
-Baseline gate fails → `pnpm restore-baseline` then re-run the same mode command.
+Baseline gate fails → `pnpm restore-baseline` then re-run the same command.
 
 ## Final sanity
 
@@ -76,3 +60,4 @@ curl -s "$TARGET_APP_URL/api/market/quotes?tickers=AAPL,MSFT" | jq '{resolved, d
 - Mutate `main`
 - Pause Datadog synthetics
 - Fabricate Linear markers (hotfix uses the real fleet)
+- Ask which mode — that is `rearm-demo`
