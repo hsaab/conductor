@@ -57,11 +57,98 @@ function findingsToSlackLines(findings: string): string[] {
 /** Slack caps a section's mrkdwn at 3000 chars; leave headroom for the title line. */
 const SLACK_FINDINGS_CHAR_BUDGET = 2800;
 
+/** One test-plan case parsed from the verify agent's findings markdown. */
+export interface VerifyCaseResult {
+  /** Heading text without the `###` prefix and without the PASS/FAIL suffix. */
+  title: string;
+  status: "pass" | "fail" | null;
+  /** Trimmed non-empty lines under the heading, `#` heading prefixes stripped. */
+  evidence: string[];
+}
+
+/** Typed view of the verify agent's findings, parsed once at the LLM boundary. */
+export interface ParsedVerifyFindings {
+  cases: VerifyCaseResult[];
+  /** Text after the `VERIFY_RESULT: PASS/FAIL` dash, e.g. "all five cases passed". */
+  verdictSummary: string | null;
+  /** Trimmed non-empty lines before the first case heading, VERIFY_RESULT line excluded. */
+  preamble: string[];
+}
+
+// Only numbered headings (`### 1. …`, `## 2) …`) start a case; sub-headings like
+// `#### Observed behavior` belong to the current case's evidence.
+const CASE_HEADING = /^#{1,6}\s+(\d+[.)].*)$/;
+const HEADING_PREFIX = /^#{1,6}\s+/;
+// The dash may be an em dash, en dash, or hyphen; the LLM sometimes drops the bold.
+const CASE_STATUS_SUFFIX = /\s*[—–-]\s*\*{0,2}(PASS|FAIL)\*{0,2}\s*$/i;
+const VERDICT_LINE = /^VERIFY_RESULT:\s*(?:PASS|FAIL)\b\s*(?:[—–-]\s*(.*))?$/i;
+
 /**
- * Slack rendering of a verify run's per-case results. `verdict` is null when
- * the findings arrive after the stage already settled (late report).
+ * Parses the verify agent's findings markdown into per-case results. Findings
+ * are LLM-authored, so anything that doesn't match the expected shape lands in
+ * `preamble` (or yields zero cases, which callers treat as unstructured).
  */
-export function formatVerifyResultsSlack(
+export function parseVerifyFindings(findings: string): ParsedVerifyFindings {
+  const cases: VerifyCaseResult[] = [];
+  const preamble: string[] = [];
+  let verdictSummary: string | null = null;
+
+  for (const raw of findings.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    const verdict = line.match(VERDICT_LINE);
+    if (verdict) {
+      verdictSummary = verdict[1]?.trim() || null;
+      continue;
+    }
+
+    const heading = line.match(CASE_HEADING);
+    if (heading) {
+      const status = heading[1].match(CASE_STATUS_SUFFIX);
+      cases.push({
+        title: heading[1].replace(CASE_STATUS_SUFFIX, "").trim(),
+        status: status ? (status[1].toUpperCase() === "PASS" ? "pass" : "fail") : null,
+        evidence: [],
+      });
+      continue;
+    }
+
+    (cases.length > 0 ? cases[cases.length - 1].evidence : preamble).push(line.replace(HEADING_PREFIX, ""));
+  }
+
+  return { cases, verdictSummary, preamble };
+}
+
+const MAX_RENDERED_CASES = 10;
+const MRKDWN_SNIPPET_CHAR_CAP = 300;
+/** Case/issue titles are LLM- or user-authored; cap them so one section stays under Slack's 3000-char limit. */
+const TITLE_CHAR_CAP = 200;
+/** Keep the notification/screen-reader fallback text under Slack's ~3000-char comfort zone. */
+const SLACK_TEXT_CHAR_CAP = 3000;
+
+function caseEmoji(status: VerifyCaseResult["status"]): string {
+  return status === "pass" ? "✅" : status === "fail" ? "❌" : "▫️";
+}
+
+/** Truncates to `cap` code points with a trailing ellipsis. Splits on code points so it never severs an emoji surrogate pair. */
+function capText(text: string, cap: number): string {
+  const chars = [...text];
+  return chars.length > cap ? `${chars.slice(0, cap).join("")}…` : text;
+}
+
+/** Joins parsed lines (evidence or preamble) into a capped mrkdwn snippet. */
+function mrkdwnSnippet(lines: string[]): string {
+  const text = lines.map((line) => line.replace(/\*\*/g, "*")).join("\n");
+  return capText(text, MRKDWN_SNIPPET_CHAR_CAP);
+}
+
+function mrkdwnSection(text: string): { type: "section"; text: { type: "mrkdwn"; text: string } } {
+  return { type: "section", text: { type: "mrkdwn", text } };
+}
+
+/** Flat rendering for findings that don't parse into cases (unstructured LLM output). */
+function formatFlatVerifyResultsSlack(
   issue: LinearIssuePayload,
   cycleLabel: string,
   verdict: "pass" | "fail" | null,
@@ -85,6 +172,77 @@ export function formatVerifyResultsSlack(
     used += line.length;
   }
   return statusBlocks(headline, lines);
+}
+
+/**
+ * Slack rendering of a verify run's per-case results. `verdict` is null when
+ * the findings arrive after the stage already settled (late report). Findings
+ * that parse into cases get a structured Block Kit layout (header, summary,
+ * one section per case); unstructured findings keep the flat rendering.
+ */
+export function formatVerifyResultsSlack(
+  issue: LinearIssuePayload,
+  cycleLabel: string,
+  verdict: "pass" | "fail" | null,
+  findings: string,
+): SlackMessage {
+  const parsed = parseVerifyFindings(findings);
+  if (parsed.cases.length === 0) {
+    return formatFlatVerifyResultsSlack(issue, cycleLabel, verdict, findings);
+  }
+
+  const headline =
+    verdict === "pass"
+      ? `✅ ${issue.identifier} · ${cycleLabel} passed`
+      : verdict === "fail"
+        ? `❌ ${issue.identifier} · ${cycleLabel} failed`
+        : `🔎 ${issue.identifier} · ${cycleLabel} findings`;
+
+  const casesWithStatus = parsed.cases.filter((c) => c.status !== null);
+  const passCount = casesWithStatus.filter((c) => c.status === "pass").length;
+
+  const preamble = mrkdwnSnippet(parsed.preamble);
+  const summaryLines = [`*${capText(issue.title, TITLE_CHAR_CAP)}*`];
+  if (preamble) summaryLines.push(preamble);
+  if (casesWithStatus.length > 0) {
+    summaryLines.push(`${passCount}/${casesWithStatus.length} checks passed`);
+  }
+  if (issue.url) summaryLines.push(`<${issue.url}|View on Linear>`);
+
+  const renderedCases = parsed.cases.slice(0, MAX_RENDERED_CASES);
+  const remaining = parsed.cases.length - renderedCases.length;
+
+  const caseSections = renderedCases.map((c) => {
+    const evidence = mrkdwnSnippet(c.evidence);
+    return mrkdwnSection(`${caseEmoji(c.status)} *${capText(c.title, TITLE_CHAR_CAP)}*${evidence ? `\n${evidence}` : ""}`);
+  });
+  if (remaining > 0) {
+    caseSections.push(mrkdwnSection(`… ${remaining} more check(s) — full findings on the Linear ticket`));
+  }
+
+  // The summary only appears when the findings carried a VERIFY_RESULT line,
+  // so re-parsing the verdict from them is safe when the arg is null (late report).
+  const verdictLine = parsed.verdictSummary
+    ? `VERIFY_RESULT: ${(verdict ?? parseVerifyVerdict(findings)) === "fail" ? "FAIL" : "PASS"} — ${parsed.verdictSummary}`
+    : null;
+
+  const textLines = [headline, issue.title];
+  if (preamble) textLines.push(preamble);
+  textLines.push(...renderedCases.map((c) => `${caseEmoji(c.status)} ${c.title}`));
+  if (verdictLine) textLines.push(verdictLine);
+  const text = textLines.join("\n");
+
+  return {
+    text: text.length > SLACK_TEXT_CHAR_CAP ? `${text.slice(0, SLACK_TEXT_CHAR_CAP - 1)}…` : text,
+    blocks: [
+      { type: "header", text: { type: "plain_text", text: headline } },
+      mrkdwnSection(summaryLines.join("\n")),
+      { type: "divider" },
+      ...caseSections,
+      ...(verdictLine ? [{ type: "context", elements: [{ type: "mrkdwn", text: verdictLine }] }] : []),
+      { type: "context", elements: [{ type: "mrkdwn", text: "conductor" }] },
+    ],
+  };
 }
 
 /**
