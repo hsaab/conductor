@@ -5,8 +5,8 @@ description: >-
   from the beginning (feature: tickets in Backlog) or from the hotfix (FE-13 PR
   armed, presenter merges) — then run the matching command. Use when the user
   says rearm, reset the demo, clean slate, start from the ticket, or arm hotfix.
-  The compound repo carries a rearm-demo skill that delegates here. Distinct
-  from compound's reset-demo skill (wipes a built feature).
+  Compound's reset-demo skill delegates here for its re-arm phase (it also
+  wipes the locally built feature first).
 ---
 
 # Reset demo state
